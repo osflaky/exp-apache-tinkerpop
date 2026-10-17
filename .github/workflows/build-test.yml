@@ -1,0 +1,43 @@
+name: build-test
+on:
+  workflow_dispatch:
+env:
+  # modules commonly excluded from builds as they have their own independent non-JVM setups and can be run in parallel.
+  # take care when modifying this list because GLVs use shell commands to remove themselves from this list and
+  # modifications could break patterns of replacement they are searching for.
+  EXCLUDE_MODULES: '-:gremlin-dotnet-source,-:gremlin-dotnet-tests,-:gremlin-go,-:gremlin-js,-:gremlin-javascript,-:gremlint,-:gremlin-mcp,-:gremlin-python'
+  EXCLUDE_FOR_GLV: '-:gremlin-console,-:gremlin-coverage,-:hadoop-gremlin,-:spark-gremlin'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 
+    github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: macos-latest
+          arch: arm64
+          runner: macos-latest
+          expander_leg: macos-latest--arm64
+    name: smoke [${{ matrix.expander_leg }}]
+    # provisioning docker on the Intel macOS runner takes several minutes on its own, so the
+    # smoke build needs more headroom there than the original 10 minutes
+    timeout-minutes: 45
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up JDK 17
+      uses: actions/setup-java@v5
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+      # macOS hosted runners do not ship a docker engine, but the install phase builds the
+      # gremlin-socket-server image, so provision docker on the Intel macOS runner
+    - name: Set up Docker (macOS)
+      if: runner.os == 'macOS' && runner.arch == 'X64'
+      uses: docker/setup-docker-action@v4
+    - name: Build with Maven
+      run: mvn clean install -DskipTests -Dci --batch-mode 
+        -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
