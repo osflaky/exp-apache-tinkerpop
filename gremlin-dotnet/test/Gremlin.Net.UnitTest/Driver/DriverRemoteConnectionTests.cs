@@ -1,0 +1,309 @@
+﻿#region License
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+#endregion
+
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Gremlin.Net.Driver;
+using Gremlin.Net.Driver.Messages;
+using Gremlin.Net.Driver.Remote;
+using Gremlin.Net.Process.Traversal;
+using Gremlin.Net.Process.Traversal.Strategy.Decoration;
+using NSubstitute;
+using Xunit;
+
+namespace Gremlin.Net.UnitTest.Driver
+{
+    public class DriverRemoteConnectionTests
+    {
+        [Fact]
+        public void ShouldDisposeProvidedGremlinClientOnDispose()
+        {
+            var gremlinClient = Substitute.For<IGremlinClient>();
+            var driverRemoteConnection = new DriverRemoteConnection(gremlinClient);
+
+            driverRemoteConnection.Dispose();
+
+            gremlinClient.Received().Dispose();
+        }
+
+        [Fact]
+        public void ShouldThrowWhenGivenNullAsGremlinClient()
+        {
+            Assert.Throws<ArgumentNullException>(() => new DriverRemoteConnection(null!));
+        }
+
+        [Fact]
+        public async Task ShouldBuildRequestWithGremlinString()
+        {
+            RequestMessage? capturedRequest = null;
+            var client = CreateCapturingClient(msg => capturedRequest = msg);
+            var connection = new DriverRemoteConnection(client, "g");
+
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+
+            await connection.SubmitAsync<object, object>(gl);
+
+            Assert.NotNull(capturedRequest);
+            Assert.Contains(".V()", capturedRequest!.Gremlin);
+        }
+
+        [Fact]
+        public async Task ShouldBuildRequestWithTraversalSource()
+        {
+            RequestMessage? capturedRequest = null;
+            var client = CreateCapturingClient(msg => capturedRequest = msg);
+            var connection = new DriverRemoteConnection(client, "mySource");
+
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+
+            await connection.SubmitAsync<object, object>(gl);
+
+            Assert.NotNull(capturedRequest);
+            Assert.Equal("mySource", capturedRequest!.Fields[Tokens.ArgsG]);
+        }
+
+        [Fact]
+        public async Task ShouldBuildRequestWithDefaultLanguage()
+        {
+            RequestMessage? capturedRequest = null;
+            var client = CreateCapturingClient(msg => capturedRequest = msg);
+            var connection = new DriverRemoteConnection(client, "g");
+
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+
+            await connection.SubmitAsync<object, object>(gl);
+
+            Assert.NotNull(capturedRequest);
+            Assert.Equal("gremlin-lang", capturedRequest!.Fields[Tokens.ArgsLanguage]);
+        }
+
+        [Fact]
+        public async Task ShouldBuildRequestWithParameters()
+        {
+            RequestMessage? capturedRequest = null;
+            var client = CreateCapturingClient(msg => capturedRequest = msg);
+            var connection = new DriverRemoteConnection(client, "g");
+
+            var gl = new GremlinLang();
+            gl.Parameters["x"] = 42;
+            gl.AddStep("V", Array.Empty<object>());
+
+            await connection.SubmitAsync<object, object>(gl);
+
+            Assert.NotNull(capturedRequest);
+            var parametersString = (string)capturedRequest!.Fields[Tokens.ArgsParameters];
+            Assert.Contains("\"x\":42", parametersString);
+            Assert.DoesNotContain("\"g\":", parametersString);
+        }
+
+        [Fact]
+        public async Task ShouldNotBuildRequestWithTraversalSourceAsParameter()
+        {
+            RequestMessage? capturedRequest = null;
+            var client = CreateCapturingClient(msg => capturedRequest = msg);
+            var connection = new DriverRemoteConnection(client, "mySource");
+
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+
+            await connection.SubmitAsync<object, object>(gl);
+
+            Assert.NotNull(capturedRequest);
+            var parametersString = capturedRequest!.Fields.TryGetValue(Tokens.ArgsParameters, out var parameters)
+                ? (string) parameters
+                : "";
+            Assert.DoesNotContain("\"g\":", parametersString);
+        }
+
+        [Fact]
+        public async Task ShouldDefaultBulkResultsToTrue()
+        {
+            RequestMessage? capturedRequest = null;
+            var client = CreateCapturingClient(msg => capturedRequest = msg);
+            var connection = new DriverRemoteConnection(client, "g");
+
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+
+            await connection.SubmitAsync<object, object>(gl);
+
+            Assert.NotNull(capturedRequest);
+            Assert.Equal(true, capturedRequest!.Fields[Tokens.ArgsBulkResults]);
+        }
+
+        [Fact]
+        public async Task ShouldExtractAllowedOptionsStrategyKeys()
+        {
+            RequestMessage? capturedRequest = null;
+            var client = CreateCapturingClient(msg => capturedRequest = msg);
+            var connection = new DriverRemoteConnection(client, "g");
+
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+            gl.OptionsStrategies.Add(new OptionsStrategy(new Dictionary<string, object>
+            {
+                { Tokens.ArgsTimeoutMillis, 5000L },
+                { Tokens.ArgsBatchSize, 100 }
+            }));
+
+            await connection.SubmitAsync<object, object>(gl);
+
+            Assert.NotNull(capturedRequest);
+            Assert.Equal(5000L, capturedRequest!.Fields[Tokens.ArgsTimeoutMillis]);
+            Assert.Equal(100, capturedRequest.Fields[Tokens.ArgsBatchSize]);
+        }
+
+        [Fact]
+        public async Task ShouldPassThroughCustomOptionsStrategyKeys()
+        {
+            RequestMessage? capturedRequest = null;
+            var client = CreateCapturingClient(msg => capturedRequest = msg);
+            var connection = new DriverRemoteConnection(client, "g");
+
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+            gl.OptionsStrategies.Add(new OptionsStrategy(new Dictionary<string, object>
+            {
+                { "someCustomKey", "someValue" }
+            }));
+
+            await connection.SubmitAsync<object, object>(gl);
+
+            Assert.NotNull(capturedRequest);
+            Assert.Equal("someValue", capturedRequest!.Fields["someCustomKey"]);
+        }
+
+        [Fact]
+        public async Task ShouldRespectPerRequestBulkResults()
+        {
+            RequestMessage? capturedRequest = null;
+            var client = CreateCapturingClient(msg => capturedRequest = msg);
+            var connection = new DriverRemoteConnection(client, "g");
+
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+            gl.OptionsStrategies.Add(new OptionsStrategy(new Dictionary<string, object>
+            {
+                { Tokens.ArgsBulkResults, false }
+            }));
+
+            await connection.SubmitAsync<object, object>(gl);
+
+            Assert.NotNull(capturedRequest);
+            Assert.Equal(false, capturedRequest!.Fields[Tokens.ArgsBulkResults]);
+        }
+
+        [Fact]
+        public async Task ShouldYieldRawScalarFromNonBulkedResponse()
+        {
+            // A raw (non-bulked) scalar must be yielded directly, not cast-failed as a Traverser.
+            var client = CreateResultClient(10L);
+            var connection = new DriverRemoteConnection(client, "g");
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+
+            var traversal = await connection.SubmitAsync<object, long>(gl);
+            var results = traversal.ToList();
+
+            Assert.Equal(new long[] { 10L }, results);
+        }
+
+        [Fact]
+        public async Task ShouldExpandBulkedTraverserFromResponse()
+        {
+            // A bulked Traverser must be expanded by its bulk count.
+            var client = CreateResultClient(new Traverser("a", 3));
+            var connection = new DriverRemoteConnection(client, "g");
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+
+            var traversal = await connection.SubmitAsync<object, string>(gl);
+            var results = traversal.ToList();
+
+            Assert.Equal(new[] { "a", "a", "a" }, results);
+        }
+
+        [Fact]
+        public async Task ShouldHandleMixOfRawValuesAndTraversers()
+        {
+            // Raw values and bulked Traversers may interleave in one response.
+            var client = CreateResultClient(1L, new Traverser(2L, 2), 3L);
+            var connection = new DriverRemoteConnection(client, "g");
+            var gl = new GremlinLang();
+            gl.AddStep("V", Array.Empty<object>());
+
+            var traversal = await connection.SubmitAsync<object, long>(gl);
+            var results = traversal.ToList();
+
+            Assert.Equal(new long[] { 1L, 2L, 2L, 3L }, results);
+        }
+
+        /// <summary>
+        ///     Creates a mock IGremlinClient whose submission returns a ResultSet streaming the
+        ///     provided items (raw values and/or Traverser instances).
+        /// </summary>
+        private static IGremlinClient CreateResultClient(params object[] items)
+        {
+            var client = Substitute.For<IGremlinClient>();
+            client.SubmitAsync<object>(Arg.Any<RequestMessage>(), Arg.Any<CancellationToken>())
+                .Returns(_ =>
+                {
+                    var channel = System.Threading.Channels.Channel.CreateUnbounded<object>();
+                    foreach (var item in items)
+                    {
+                        channel.Writer.TryWrite(item);
+                    }
+                    channel.Writer.Complete();
+                    var cts = new CancellationTokenSource();
+                    var resultSet = new ResultSet<object>(channel.Reader, cts, Task.CompletedTask);
+                    return Task.FromResult(resultSet);
+                });
+            return client;
+        }
+
+        /// <summary>
+        ///     Creates a mock IGremlinClient that captures the submitted RequestMessage.
+        /// </summary>
+        private static IGremlinClient CreateCapturingClient(Action<RequestMessage> capture)
+        {
+            var client = Substitute.For<IGremlinClient>();
+            client.SubmitAsync<object>(Arg.Any<RequestMessage>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    capture(callInfo.Arg<RequestMessage>());
+                    var channel = System.Threading.Channels.Channel.CreateUnbounded<object>();
+                    channel.Writer.Complete();
+                    var cts = new CancellationTokenSource();
+                    var emptyResult = new ResultSet<object>(
+                        channel.Reader, cts, Task.CompletedTask);
+                    return Task.FromResult(emptyResult);
+                });
+            return client;
+        }
+    }
+}

@@ -1,0 +1,115 @@
+{
+  "name": "gremlin",
+  "version": "4.0.0-alpha1",
+  "description": "JavaScript Gremlin Language Variant",
+  "author": {
+    "name": "Apache TinkerPop team"
+  },
+  "keywords": [
+    "graph",
+    "gremlin",
+    "tinkerpop",
+    "apache-tinkerpop",
+    "connection",
+    "glv",
+    "driver",
+    "database",
+    "graphdb"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./build/cjs/index.cjs",
+  "types": "./build/esm/index.d.ts",
+  "browser": {
+    "./build/esm/driver/dispatcher.js": "./build/esm/driver/dispatcher.browser.js",
+    "./build/cjs/driver/dispatcher.cjs": "./build/cjs/driver/dispatcher.browser.cjs"
+  },
+  "exports": {
+    ".": {
+      "import": "./build/esm/index.js",
+      "require": "./build/cjs/index.cjs",
+      "types": "./build/esm/index.d.ts"
+    },
+    "./language": {
+      "import": "./build/esm/language/index.js",
+      "types": "./build/esm/language/index.d.ts"
+    },
+    "./io": {
+      "import": "./build/esm/structure/io/binary/GraphBinary.js",
+      "types": "./build/esm/structure/io/binary/GraphBinary.d.ts"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "language": [
+        "./build/esm/language/index.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "build"
+  ],
+  "dependencies": {
+    "antlr4ng": "3.0.16",
+    "buffer": "^6.0.3",
+    "eventemitter3": "^5.0.1",
+    "undici": "6.28.0"
+  },
+  "optionalDependencies": {
+    "@aws-sdk/credential-providers": "^3.967.0",
+    "@smithy/hash-node": "^4.2.12",
+    "@smithy/signature-v4": "^5.3.12"
+  },
+  "devDependencies": {
+    "@cucumber/cucumber": "~13.0.0",
+    "@eslint/js": "^10.0.1",
+    "@knighted/duel": "^4.1.1",
+    "@tsconfig/node18": "^18.2.2",
+    "antlr-ng": "^1.0.10",
+    "chai": "^6.2.2",
+    "chai-string": "^2.0.0",
+    "colors": "1.4.0",
+    "cross-env": "^10.1.0",
+    "deep-eql": "^5.0.2",
+    "eslint": "^10.3.0",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-prettier": "^5.0.0",
+    "globals": "^17.5.0",
+    "mocha": "^11.7.5",
+    "prettier": "^3.0.0",
+    "ts-node": "^10.9.2",
+    "typedoc": "^0.28.18",
+    "typescript": "~6.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/apache/tinkerpop.git"
+  },
+  "homepage": "https://tinkerpop.apache.org/",
+  "bugs": {
+    "url": "https://issues.apache.org/jira/browse/TINKERPOP"
+  },
+  "scripts": {
+    "generate": "mkdir -p lib/language/grammar && antlr-ng -Dlanguage=TypeScript -visitor --generate-listener --exact-output-dir -o lib/language/grammar ../../gremlin-language/src/main/antlr4/Gremlin.g4",
+    "prebuild": "node scripts/patch-antlr4ng.js && npm run generate",
+    "_prebuild_note": "patch-antlr4ng.js is a build-time stop-gap for antlr4ng missing .d.cts CJS type declarations (antlr4ng issues #23/#26). antlr4ng is pinned to an exact version in dependencies. Before upgrading antlr4ng, verify the patch still applies or that upstream has fixed the issue.",
+    "build": "rm -rf build && duel --dirs",
+    "prepare": "npm run generate && npm run build",
+    "test": "npm run unit-test && npm run integration-test",
+    "unit-test": "cross-env TS_NODE_PROJECT='tsconfig.test.json' mocha 'test/unit/**/*.{js,ts}'",
+    "integration-test": "npm run integration-test-graphbinary",
+    "integration-test-graphbinary": "cross-env TS_NODE_PROJECT='tsconfig.test.json' CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' mocha test/integration -t 5000",
+    "TODO": "# test other mime types like graphbinary stringd",
+    "features": "npm run features-graphbinary && npm run features-graphbinary-params",
+    "features-graphbinary": "cross-env NODE_OPTIONS='--loader ts-node/esm' TS_NODE_PROJECT='tsconfig.test.json' CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' cucumber-js --tags \"not @DataBigDecimal and not @DataBigInt and not @DataUUID and not @DataLong and not @StepWrite\" --import test/cucumber ../../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/",
+    "features-graphbinary-params": "cross-env NODE_OPTIONS='--loader ts-node/esm' TS_NODE_PROJECT='tsconfig.test.json' CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' PARAMETERIZE=true cucumber-js --tags \"not @DataBigDecimal and not @DataBigInt and not @DataUUID and not @DataLong and not @StepWrite\" --import test/cucumber ../../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/",
+    "features-docker": "npm run features-graphbinary-docker && npm run features-graphbinary-params-docker",
+    "features-graphbinary-docker": "cross-env NODE_OPTIONS='--loader ts-node/esm' TS_NODE_PROJECT='tsconfig.test.json' CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' cucumber-js --tags \"not @DataBigDecimal and not @DataBigInt and not @DataUUID and not @DataLong and not @StepWrite\" --import test/cucumber /gremlin-test/",
+    "features-graphbinary-params-docker": "cross-env NODE_OPTIONS='--loader ts-node/esm' TS_NODE_PROJECT='tsconfig.test.json' CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' PARAMETERIZE=true cucumber-js --tags \"not @DataBigDecimal and not @DataBigInt and not @DataUUID and not @DataLong and not @StepWrite\" --import test/cucumber /gremlin-test/",
+    "lint": "eslint --ext .js .",
+    "doc": "typedoc --out doc --readme README.md --entryPointStrategy expand --entryPoints 'lib/**/*.ts' --tsconfig tsconfig.json --exclude 'lib/language/grammar/**'"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,709 @@
+/*
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+*/
+
+package gremlingo
+
+import (
+	"encoding/base64"
+	"fmt"
+	"math"
+	"math/big"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/google/uuid"
+)
+
+type GremlinLang struct {
+	emptyArray        []interface{}
+	gremlin           []string
+	parameters        map[string]interface{}
+	optionsStrategies []*traversalStrategy
+	pdtRegistry       *PDTRegistry
+}
+
+// NewGremlinLang creates a new GremlinLang to be used in traversals.
+func NewGremlinLang(gl *GremlinLang) *GremlinLang {
+	gremlin := make([]string, 0)
+	parameters := make(map[string]interface{})
+	optionsStrategies := make([]*traversalStrategy, 0)
+	var registry *PDTRegistry
+	if gl != nil {
+		gremlin = make([]string, len(gl.gremlin))
+		copy(gremlin, gl.gremlin)
+
+		parameters = make(map[string]interface{})
+		for k, v := range gl.parameters {
+			parameters[k] = v
+		}
+
+		optionsStrategies = make([]*traversalStrategy, len(gl.optionsStrategies))
+		copy(optionsStrategies, gl.optionsStrategies)
+		registry = gl.pdtRegistry
+	}
+
+	return &GremlinLang{
+		gremlin:           gremlin,
+		parameters:        parameters,
+		optionsStrategies: optionsStrategies,
+		pdtRegistry:       registry,
+	}
+}
+
+func (gl *GremlinLang) addToGremlin(name string, args ...interface{}) error {
+	flattenedArgs := gl.flattenArguments(args...)
+	if name == "CardinalityValueTraversal" {
+		str0, err := gl.argAsString(flattenedArgs[0])
+		if err != nil {
+			return err
+		}
+		str1, err := gl.argAsString(flattenedArgs[1])
+		if err != nil {
+			return err
+		}
+		gl.gremlin = append(gl.gremlin, str0)
+		gl.gremlin = append(gl.gremlin, "(")
+		gl.gremlin = append(gl.gremlin, str1)
+		gl.gremlin = append(gl.gremlin, ")")
+		return nil
+	}
+
+	gl.gremlin = append(gl.gremlin, ".")
+	gl.gremlin = append(gl.gremlin, name)
+	gl.gremlin = append(gl.gremlin, "(")
+
+	for i := 0; i < len(flattenedArgs); i++ {
+		if i > 0 {
+			gl.gremlin = append(gl.gremlin, ",")
+		}
+		convertArg, err := gl.convertArgument(flattenedArgs[i]) //.Index(i).Interface())
+		if err != nil {
+			return err
+		}
+		argStr, err := gl.argAsString(convertArg)
+		if err != nil {
+			return err
+		}
+		gl.gremlin = append(gl.gremlin, argStr)
+	}
+	gl.gremlin = append(gl.gremlin, ")")
+	return nil
+}
+
+// escapeString escapes a string value for safe embedding in a GremlinLang script.
+func escapeString(s string) string {
+	var sb strings.Builder
+	for _, c := range s {
+		switch c {
+		case '\\':
+			sb.WriteString(`\\`)
+		case '"':
+			sb.WriteString(`\"`)
+		case '\n':
+			sb.WriteString(`\n`)
+		case '\r':
+			sb.WriteString(`\r`)
+		case '\t':
+			sb.WriteString(`\t`)
+		case '\b':
+			sb.WriteString(`\b`)
+		case '\f':
+			sb.WriteString(`\f`)
+		default:
+			sb.WriteRune(c)
+		}
+	}
+	return sb.String()
+}
+
+func isValidParameterName(name string) bool {
+	runes := []rune(name)
+	if len(runes) == 0 {
+		return false
+	}
+	if !unicode.IsLetter(runes[0]) && runes[0] != '_' && runes[0] != '$' {
+		return false
+	}
+	for _, r := range runes[1:] {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '$' {
+			return false
+		}
+	}
+	return true
+}
+
+func (gl *GremlinLang) argAsString(arg interface{}) (string, error) {
+	if arg == nil {
+		return "null", nil
+	}
+
+	switch v := arg.(type) {
+	case string:
+		return fmt.Sprintf("\"%s\"", escapeString(v)), nil
+	case bool:
+		return strconv.FormatBool(v), nil
+	case int8, uint8:
+		return fmt.Sprintf("%dB", v), nil
+	case int16:
+		return fmt.Sprintf("%dS", v), nil
+	case int32, uint16:
+		return fmt.Sprintf("%d", v), nil
+	case int:
+		if v <= math.MaxInt32 && v >= math.MinInt32 {
+			return fmt.Sprintf("%d", v), nil
+		} else {
+			return fmt.Sprintf("%dL", v), nil
+		}
+	case int64, uint32:
+		return fmt.Sprintf("%dL", v), nil
+	case uint:
+		if v <= math.MaxUint32 {
+			return fmt.Sprintf("%dL", v), nil
+		} else {
+			return fmt.Sprintf("%dN", v), nil
+		}
+	case uint64, *big.Int:
+		return fmt.Sprintf("%dN", v), nil
+	case float32:
+		if math.IsNaN(float64(v)) {
+			return "NaN", nil
+		}
+		if math.IsInf(float64(v), 1) {
+			return "+Infinity", nil
+		}
+		if math.IsInf(float64(v), -1) {
+			return "-Infinity", nil
+		}
+		return fmt.Sprintf("%vF", v), nil
+	case float64:
+		if math.IsNaN(v) {
+			return "NaN", nil
+		}
+		if math.IsInf(v, 1) {
+			return "+Infinity", nil
+		}
+		if math.IsInf(v, -1) {
+			return "-Infinity", nil
+		}
+		return fmt.Sprintf("%vD", v), nil
+	case *SimpleSet:
+		return gl.translateSet(v.ToSlice())
+	case BigDecimal:
+		return fmt.Sprintf("%vM", v.Value()), nil
+	case *BigDecimal:
+		return fmt.Sprintf("%vM", v.Value()), nil
+	case time.Time:
+		return fmt.Sprintf("datetime(\"%v\")", v.Format("2006-01-02T15:04:05.000Z07:00")), nil // equivalent to time.RFC3339 but with ms precision instead of seconds
+	case cardinality, column, direction, operator, order, pick, pop, barrier, scope, t, merge, gType:
+		name := reflect.ValueOf(v).Type().Name()
+		return fmt.Sprintf("%s.%s", strings.ToUpper(name[:1])+name[1:], v), nil
+	case dt:
+		name := reflect.ValueOf(v).Type().Name()
+		return fmt.Sprintf("%s.%s", strings.ToUpper(name), v), nil
+	case *CompositePDT:
+		fields := v.Fields
+		if fields == nil {
+			fields = map[string]interface{}{}
+		}
+		mapStr, err := gl.translateMap(fields)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("PDT(\"%s\",%s)", escapeString(v.Name), mapStr), nil
+	case *PrimitivePDT:
+		return fmt.Sprintf("PDT(\"%s\",\"%s\")", escapeString(v.Name), escapeString(v.Value)), nil
+	case *Vertex:
+		return gl.argAsString(v.Id)
+	case textP:
+		return gl.translateTextPredicate(&v)
+	case *textP:
+		return gl.translateTextPredicate(v)
+	case p:
+		return gl.translatePredicate(&v)
+	case *p:
+		return gl.translatePredicate(v)
+	case Traversal:
+		gremlinLang := v.GremlinLang
+		for key, val := range gremlinLang.parameters {
+			gl.parameters[key] = val
+		}
+		return gremlinLang.GetGremlin("__"), nil
+	case *Traversal:
+		gremlinLang := v.GremlinLang
+		for key, val := range gremlinLang.parameters {
+			gl.parameters[key] = val
+		}
+		return gremlinLang.GetGremlin("__"), nil
+	case GraphTraversal:
+		gremlinLang := v.GremlinLang
+		for key, val := range gremlinLang.parameters {
+			gl.parameters[key] = val
+		}
+		return gremlinLang.GetGremlin("__"), nil
+	case *GraphTraversal:
+		gremlinLang := v.GremlinLang
+		for key, val := range gremlinLang.parameters {
+			gl.parameters[key] = val
+		}
+		return gremlinLang.GetGremlin("__"), nil
+	case GremlinLang:
+		for key, val := range v.parameters {
+			gl.parameters[key] = val
+		}
+		return v.GetGremlin("__"), nil
+	case *GremlinLang:
+		for key, val := range v.parameters {
+			gl.parameters[key] = val
+		}
+		return v.GetGremlin("__"), nil
+	case GValue:
+		key := v.Name
+		if !isValidParameterName(key) {
+			panic(fmt.Sprintf("invalid parameter name [%v]", key))
+		}
+		value := v.Value
+		if val, ok := gl.parameters[key]; ok {
+			if !reflect.DeepEqual(val, value) {
+				panic(fmt.Sprintf("parameter with name '%v' already exists.", key))
+			}
+		} else {
+			gl.parameters[key] = v.Value
+		}
+		return key, nil
+	case uuid.UUID:
+		return fmt.Sprintf("UUID(\"%v\")", v.String()), nil
+	case time.Duration:
+		isNegative := v < 0
+		abs := v
+		if isNegative {
+			abs = -v
+		}
+		totalSeconds := int64(abs / time.Second)
+		nanos := int64(abs % time.Second)
+		if isNegative {
+			return fmt.Sprintf("Duration(%d,%d,false)", totalSeconds, nanos), nil
+		}
+		return fmt.Sprintf("Duration(%d,%d)", totalSeconds, nanos), nil
+	case ByteBuffer:
+		return fmt.Sprintf("Binary(\"%s\")", base64.StdEncoding.EncodeToString(v.Data)), nil
+	case *ByteBuffer:
+		return fmt.Sprintf("Binary(\"%s\")", base64.StdEncoding.EncodeToString(v.Data)), nil
+	case []byte:
+		return fmt.Sprintf("Binary(\"%s\")", base64.StdEncoding.EncodeToString(v)), nil
+	default:
+		// Registry-based dehydration: a registered adapter intentionally takes precedence
+		// over any reflection/struct-based fallback, allowing explicit adapters to override
+		// default behavior for a given Go type.
+		if gl.pdtRegistry != nil {
+			// Check primitive adapter before composite (mandatory per Python review lesson).
+			primitiveAdapter := gl.pdtRegistry.GetPrimitiveAdapterByType(reflect.TypeOf(arg))
+			if primitiveAdapter != nil && primitiveAdapter.ToString != nil {
+				s, err := primitiveAdapter.ToString(arg)
+				if err == nil {
+					pdt := &PrimitivePDT{Name: primitiveAdapter.TypeName, Value: s}
+					return gl.argAsString(pdt)
+				}
+			}
+			adapter := gl.pdtRegistry.GetAdapterByType(reflect.TypeOf(arg))
+			if adapter != nil && adapter.ToFields != nil {
+				fields, err := adapter.ToFields(arg)
+				if err == nil {
+					pdt := &CompositePDT{Name: adapter.TypeName, Fields: fields}
+					return gl.argAsString(pdt)
+				}
+			}
+		}
+		switch reflect.TypeOf(arg).Kind() {
+		case reflect.Map:
+			return gl.translateMap(arg)
+		case reflect.Slice:
+			return gl.translateSlice(arg)
+		default:
+			// Panic rather than returning an error because unsupported types are programmer
+			// mistakes (passing a type the library can't serialize), not recoverable runtime
+			// conditions. This matches the existing GValue validation pattern in this file.
+			// An error-return approach was considered but every caller in the fluent traversal
+			// API (AddSource, WithSack, etc.) would need to propagate and immediately panic
+			// anyway, adding complexity with no practical benefit.
+			panic(fmt.Sprintf("GremlinLang contains at least one type [%s] that cannot be represented as text", reflect.TypeOf(arg).Name()))
+		}
+	}
+}
+
+func (gl *GremlinLang) translateMap(arg interface{}) (string, error) {
+	sb := strings.Builder{}
+	sb.WriteString("[")
+	size := reflect.ValueOf(arg).Len()
+	if size == 0 {
+		sb.WriteString(":")
+	} else {
+		mapVal := reflect.ValueOf(arg)
+		keys := mapVal.MapKeys()
+		// Sort keys for deterministic output (not semantic ordering)
+		sort.Slice(keys, func(i, j int) bool {
+			return fmt.Sprintf("%v", keys[i].Interface()) < fmt.Sprintf("%v", keys[j].Interface())
+		})
+		for idx, key := range keys {
+			k := key.Interface()
+			kString, err := gl.argAsString(k)
+			if err != nil {
+				return "", err
+			}
+			v := mapVal.MapIndex(key).Interface()
+			vString, err := gl.argAsString(v)
+			if err != nil {
+				return "", err
+			}
+			sb.WriteString(kString)
+			sb.WriteByte(':')
+			sb.WriteString(vString)
+			if idx < len(keys)-1 {
+				sb.WriteString(",")
+			}
+		}
+	}
+
+	sb.WriteString("]")
+	return sb.String(), nil
+}
+
+func (gl *GremlinLang) translateSlice(arg interface{}) (string, error) {
+	return gl.translateCollection(arg, "[", "]")
+}
+
+func (gl *GremlinLang) translateSet(arg interface{}) (string, error) {
+	return gl.translateCollection(arg, "{", "}")
+}
+
+func (gl *GremlinLang) translateCollection(arg interface{}, open, close string) (string, error) {
+	sb := strings.Builder{}
+	sb.WriteString(open)
+	list := reflect.ValueOf(arg)
+
+	for i := 0; i < list.Len(); i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		vString, err := gl.argAsString(list.Index(i).Interface())
+		if err != nil {
+			return "", err
+		}
+		sb.WriteString(vString)
+	}
+	sb.WriteString(close)
+	return sb.String(), nil
+}
+
+func (gl *GremlinLang) translateTextPredicate(v *textP) (string, error) {
+	if v.operator == "" && len(v.values) == 0 {
+		return "", nil
+	}
+
+	if v.operator == "or" || v.operator == "and" {
+		return gl.translateConnPOp(v.operator, v.values, gl.getPredicateString)
+	}
+	return gl.translatePValue(v.operator, v.values)
+}
+
+func (gl *GremlinLang) translatePredicate(v *p) (string, error) {
+	if v.operator == "" && len(v.values) == 0 {
+		return "", nil
+	}
+
+	if v.operator == "or" || v.operator == "and" {
+		return gl.translateConnPOp(v.operator, v.values, gl.getPredicateString)
+	}
+	return gl.translatePValue(v.operator, v.values)
+}
+
+func (gl *GremlinLang) translateConnPOp(operator string, values []interface{}, translator func(interface{}) (string, error)) (string, error) {
+	arg1, err := translator(values[0])
+	if err != nil {
+		return "", err
+	}
+	arg2, err := translator(values[1])
+	if err != nil {
+		return "", err
+	}
+	return arg1 + "." + operator + "(" + arg2 + ")", nil
+}
+
+func (gl *GremlinLang) getPredicateString(v interface{}) (string, error) {
+	if val, ok := v.(textP); ok {
+		return gl.translateTextPredicate(&val)
+	}
+	if val, ok := v.(*textP); ok {
+		return gl.translateTextPredicate(val)
+	}
+	if val, ok := v.(p); ok {
+		return gl.translatePredicate(&val)
+	}
+	return gl.translatePredicate(v.(*p))
+}
+
+func (gl *GremlinLang) translatePValue(operator string, values []interface{}) (string, error) {
+	sb := strings.Builder{}
+	sb.WriteString(operator + "(")
+
+	// Check if all values are traversals - if so, serialize as comma-separated args (no brackets)
+	// This matches the server grammar: within(trav1, trav2) via genericArgumentVarargs
+	allTraversals := len(values) > 1
+	if allTraversals {
+		for _, v := range values {
+			switch v.(type) {
+			case *Traversal, Traversal, *GraphTraversal, GraphTraversal:
+				// ok, it's a traversal
+			default:
+				allTraversals = false
+				break
+			}
+		}
+	}
+
+	if len(values) > 1 && !allTraversals && operator != "between" && operator != "inside" && operator != "outside" {
+		sb.WriteString("[")
+	}
+
+	for i, arg := range values {
+		argString, err := gl.argAsString(arg)
+		if err != nil {
+			return "", err
+		}
+		sb.WriteString(argString)
+		if i < len(values)-1 && argString != "" {
+			sb.WriteString(",")
+		}
+	}
+
+	if len(values) > 1 && !allTraversals && operator != "between" && operator != "inside" && operator != "outside" {
+		sb.WriteString("]")
+	}
+	sb.WriteString(")")
+
+	return sb.String(), nil
+}
+
+func (gl *GremlinLang) GetGremlin(arg ...string) string {
+	var g string
+	gremlin := strings.Join(gl.gremlin, "")
+	if len(arg) == 0 {
+		g = "g"
+	} else {
+		g = arg[0]
+	}
+	// special handling for CardinalityValueTraversal
+	if len(gl.gremlin) != 0 && string(gremlin[0]) != "." {
+		return gremlin
+	}
+	return g + gremlin
+}
+
+func (gl *GremlinLang) GetParameters() map[string]interface{} {
+	return gl.parameters
+}
+
+// GetParametersAsString serializes this instance's parameter map to a gremlin-lang map literal string.
+func (gl *GremlinLang) GetParametersAsString() string {
+	return ConvertParametersToString(gl.parameters)
+}
+
+// ConvertParametersToString converts a parameter map to a gremlin-lang map literal string.
+// Panics if any value is an unsupported type.
+func ConvertParametersToString(params map[string]interface{}) string {
+	if params == nil || len(params) == 0 {
+		return "[:]"
+	}
+
+	helper := NewGremlinLang(nil)
+	sb := strings.Builder{}
+	sb.WriteString("[")
+	first := true
+	for k, v := range params {
+		if !first {
+			sb.WriteString(",")
+		}
+		ks, _ := helper.argAsString(k)
+		vs, _ := helper.argAsString(v)
+		sb.WriteString(ks)
+		sb.WriteString(":")
+		sb.WriteString(vs)
+		first = false
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+func (gl *GremlinLang) AddSource(name string, arguments ...interface{}) {
+	if (name == "withStrategies" || name == "withoutStrategies") && len(arguments) != 0 {
+		args := gl.buildStrategyArgs(arguments...)
+		// possible to have empty strategies list to send
+		if len(args) != 0 {
+			if name == "withoutStrategies" {
+				gl.gremlin = append(gl.gremlin, ".withoutStrategies(")
+			} else {
+				gl.gremlin = append(gl.gremlin, ".withStrategies(")
+			}
+			gl.gremlin = append(gl.gremlin, args)
+			gl.gremlin = append(gl.gremlin, ")")
+		}
+		return
+	}
+	gl.addToGremlin(name, arguments)
+}
+
+func (gl *GremlinLang) buildStrategyArgs(args ...interface{}) string {
+	sb := strings.Builder{}
+	c := 0
+	for _, arg := range args {
+		if c > 0 {
+			sb.WriteString(",")
+		}
+		strategy, ok := arg.(*traversalStrategy)
+		if !ok {
+			// error?
+			continue
+		}
+		// special handling for OptionsStrategy
+		if strategy.name == "OptionsStrategy" {
+			gl.optionsStrategies = append(gl.optionsStrategies, strategy)
+			// Render multilabel/singlelabel in gremlin text (temporary until these options are removed)
+			if _, ok := strategy.configuration["multilabel"]; ok {
+				gl.gremlin = append(gl.gremlin, ".with(\"multilabel\")")
+			}
+			if _, ok := strategy.configuration["singlelabel"]; ok {
+				gl.gremlin = append(gl.gremlin, ".with(\"singlelabel\")")
+			}
+			continue
+		}
+		if len(strategy.configuration) == 0 {
+			sb.WriteString(strategy.name)
+		} else {
+			sb.WriteString("new ")
+			sb.WriteString(strategy.name)
+			sb.WriteString("(")
+			ct := 0
+			for key, val := range strategy.configuration {
+				if ct > 0 {
+					sb.WriteString(",")
+				}
+				sb.WriteString(key)
+				sb.WriteString(":")
+				traversal, ok := val.(*Traversal)
+				if ok {
+					stringTraversal, _ := gl.argAsString(traversal.GremlinLang)
+					sb.WriteString(stringTraversal)
+				} else {
+					stringArg, _ := gl.argAsString(val)
+					sb.WriteString(stringArg)
+				}
+				ct++
+			}
+			sb.WriteString(")")
+		}
+		c++
+	}
+	return sb.String()
+}
+
+func (gl *GremlinLang) AddStep(stepName string, arguments ...interface{}) error {
+	err := gl.addToGremlin(stepName, arguments)
+	return err
+}
+
+func (gl *GremlinLang) GetOptionsStrategies() []*traversalStrategy {
+	return gl.optionsStrategies
+}
+
+func (gl *GremlinLang) IsEmpty() bool {
+	return len(gl.gremlin) == 0
+}
+
+func (gl *GremlinLang) flattenArguments(arguments ...interface{}) []interface{} {
+	if arguments == nil || len(arguments) == 0 {
+		return gl.emptyArray
+	}
+	flatArgs := make([]interface{}, 0)
+	for _, argument := range arguments {
+		arg, ok := argument.([]interface{})
+		if ok {
+			for _, nestedArg := range arg {
+				_, isUUID := nestedArg.(uuid.UUID)
+				if isUUID {
+					flatArgs = append(flatArgs, nestedArg)
+				} else {
+					converted, _ := gl.convertArgument(nestedArg)
+					flatArgs = append(flatArgs, converted)
+				}
+			}
+		} else {
+			converted, _ := gl.convertArgument(argument)
+			flatArgs = append(flatArgs, converted)
+		}
+	}
+	return flatArgs
+}
+
+func (gl *GremlinLang) convertArgument(arg interface{}) (interface{}, error) {
+	if arg == nil {
+		return nil, nil
+	}
+	switch v := arg.(type) {
+	case *Traversal:
+		if v.graph != nil {
+			return nil, fmt.Errorf("the child traversal of %s was not spawned anonymously - "+
+				"use the __ class rather than a TraversalSource to construct the child traversal", arg)
+		}
+		return v.GremlinLang, nil
+	default:
+		switch reflect.TypeOf(arg).Kind() {
+		case reflect.Map:
+			argMap := reflect.ValueOf(arg)
+			newMap := make(map[interface{}]interface{}, argMap.Len())
+			for _, key := range argMap.MapKeys() {
+				convertKey, _ := gl.convertArgument(key.Interface())
+				convertValue, _ := gl.convertArgument(argMap.MapIndex(key).Interface())
+				newMap[convertKey] = convertValue
+			}
+			return newMap, nil
+		case reflect.Array, reflect.Slice:
+			_, isUUID := arg.(uuid.UUID)
+			if isUUID {
+				return arg, nil
+			}
+			// preserve []byte as-is for Binary literal support
+			_, isByteSlice := arg.([]byte)
+			if isByteSlice {
+				return arg, nil
+			}
+			argList := reflect.ValueOf(arg)
+			newList := make([]interface{}, argList.Len())
+			for i := 0; i < argList.Len(); i++ {
+				convertValue, _ := gl.convertArgument(argList.Index(i).Interface())
+				newList[i] = convertValue
+			}
+			return newList, nil
+		default:
+			return arg, nil
+		}
+	}
+}

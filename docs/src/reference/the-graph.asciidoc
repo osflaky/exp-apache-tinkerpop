@@ -1,0 +1,312 @@
+////
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+////
+[[graph]]
+[llms-summary="The structure API: graphs, vertices, edges, properties, meta- and multi-properties, transactions, variables, and the features a graph implementation can support."]
+= The Graph
+
+image::gremlin-standing.png[width=125]
+
+The <<intro,Introduction>> discussed the diversity of TinkerPop-enabled graphs, with special attention paid to the
+different <<connecting-gremlin,connection models>>, and how TinkerPop makes it possible to bridge that diversity in
+an <<staying-agnostic,agnostic>> manner. This particular section deals with elements of the Graph API which was noted
+as an API to avoid when trying to build an agnostic system. The Graph API refers to the core elements of what composes
+the <<graph-computing,structure of a graph>> within the Gremlin Traversal Machine (GTM), such as the `Graph`, `Vertex`
+and `Edge` Java interfaces.
+
+To maintain the most portable code, users should only reference these interfaces. To "reference", simply means to
+utilize it as a pointer. For `Graph`, that means holding a pointer to the location of graph data and then using it to
+spawn `GraphTraversalSource` instances so as to write Gremlin:
+
+[gremlin-groovy]
+----
+graph = TinkerGraph.open()
+g = traversal().with(graph)
+g.addV('person')
+----
+
+In the above example, "graph" is the `Graph` interface produced by calling `open()` on `TinkerGraph` which creates the
+instance. Note that while the end intent of the code is to create a "person" vertex, it does not use the APIs on
+`Graph` to do that - e.g. `graph.addVertex(T.label,'person')`.
+
+Even if the developer desired to use the `graph.addVertex()` method there are only a handful of scenarios where it is
+possible:
+
+* The application is being developed on the JVM and the developer is using <<connecting-embedded, embedded>> mode
+* The architecture includes Gremlin Server and the user is sending Gremlin scripts to the server
+* The graph system chosen is a <<connecting-rgp, Remote Gremlin Provider>> and they expose the Graph API via scripts
+
+Note that Gremlin Language Variants force developers to use the Graph API by reference. There is no `addVertex()`
+method available to GLVs on their respective `Graph` instances, nor are their graph elements filled with data at the
+call of `properties()`. Developing applications to meet this lowest common denominator in API usage will go a long
+way to making that application portable across TinkerPop-enabled systems.
+
+When considering the remaining sub-sections that follow, recall that they are all generally bound to the Graph API.
+They are described here for reference and in some sense backward compatibility with older recommended models of
+development. In the future, the contents of this section will become less and less relevant.
+
+== Features
+
+A `Feature` implementation describes the capabilities of a `Graph` instance. This interface is implemented by graph
+system providers for two purposes:
+
+. It tells users the capabilities of their `Graph` instance.
+. It allows the features they do comply with to be tested against the Gremlin Test Suite - tests that do not comply are "ignored").
+
+The following example in the Gremlin Console shows how to print all the features of a `Graph`:
+
+[gremlin-groovy]
+----
+graph = TinkerGraph.open()
+graph.features()
+----
+
+The printed output groups the supported capabilities by the element they describe: graph features (which
+include a nested set of variable features), vertex features (with their vertex property features), and edge
+features (with their edge property features). Each group lists the individual capabilities of that element
+type as boolean flags, where a value of `true` indicates that the `Graph` supports the associated operation.
+
+A common pattern for using features is to check their support prior to performing an operation. The example
+below creates a traversal source `g` from the `graph` and guards a transaction commit behind the relevant
+feature check, so that the commit is only attempted when the `Graph` actually supports transactions:
+
+[gremlin-groovy]
+----
+g = traversal().with(graph);[]
+graph.features().graph().supportsTransactions()
+graph.features().graph().supportsTransactions() ? g.tx().commit() : "no tx"
+----
+
+TIP: To ensure provider agnostic code, always check feature support prior to usage of a particular function.  In that
+way, the application can behave gracefully in case a particular implementation is provided at runtime that does not
+support a function being accessed.
+
+WARNING: Features of reference graphs which are used to connect to remote graphs do not reflect the features of the
+graph to which it connects. It reflects the features of instantiated graph itself, which will likely be quite
+different considering that reference graphs will typically be immutable.
+
+[[optional-data-model-variances]]
+== Optional Data Model Variances
+
+The simplest property graph model consists of vertices and edges, each with a single label and a set of key/value
+properties. This baseline is consistent with the labelled property graph model and is the setup most widely
+supported across TinkerPop-enabled graphs. Beyond that baseline, TinkerPop allows graph providers to optionally
+support certain advanced variances on the data model that extend what a graph element can represent. Support for
+these variances differs from provider to provider and can be discovered at runtime via <<features,`Feature`>>. The
+variances covered in this section are:
+
+* Multiple properties (*multi-properties*): a vertex property key can have multiple values.
+* Properties on properties (*meta-properties*): a vertex property can itself have properties.
+* Multiple labels (*multi-label*): a vertex can carry more than one label, or none at all, rather than exactly one.
+* Null property values (*nullable properties*): a property value of `null` can be stored rather than triggering
+removal of the property.
+
+[[vertex-properties]]
+=== Vertex Properties
+
+image:vertex-properties.png[width=215,float=left] TinkerPop introduces the concept of a `VertexProperty<V>`. All the
+properties of a `Vertex` are a `VertexProperty`. A `VertexProperty` implements `Property` and as such, it has a
+key/value pair. However, `VertexProperty` also implements `Element` and thus, can have a collection of key/value
+pairs. Moreover, while an `Edge` can only have one property of key "name" (for example), a `Vertex` can have multiple
+"name" properties. This is what enables the multi-properties and meta-properties variances introduced above.
+
+Possible use cases for meta-properties:
+
+. *Permissions*: Vertex properties can have key/value ACL-type permission information associated with them.
+. *Auditing*: When a vertex property is manipulated, it can have key/value information attached to it saying who the
+creator, deletor, etc. are.
+. *Provenance*: The "name" of a vertex can be declared by multiple users.  For example, there may be multiple spellings
+of a name from different sources.
+
+A running example using vertex properties is provided below to demonstrate and explain the API.
+
+[gremlin-groovy]
+----
+graph = TinkerGraph.open()
+g = traversal().with(graph)
+v = g.addV().property('name','marko').property('name','marko a. rodriguez').next()
+g.V(v).properties('name').count() <1>
+v.property(list, 'name', 'm. a. rodriguez') <2>
+g.V(v).properties('name').count()
+g.V(v).properties()
+g.V(v).properties('name')
+g.V(v).properties('name').hasValue('marko')
+g.V(v).properties('name').hasValue('marko').property('acl','private') <3>
+g.V(v).properties('name').hasValue('marko a. rodriguez')
+g.V(v).properties('name').hasValue('marko a. rodriguez').property('acl','public')
+g.V(v).properties('name').has('acl','public').value()
+g.V(v).properties('name').has('acl','public').drop() <4>
+g.V(v).properties('name').has('acl','public').value()
+g.V(v).properties('name').has('acl','private').value()
+g.V(v).properties()
+g.V(v).properties().properties() <5>
+g.V(v).properties().property('date',2014) <6>
+g.V(v).properties().property('creator','stephen')
+g.V(v).properties().properties()
+g.V(v).properties('name').valueMap()
+g.V(v).property('name','okram') <7>
+g.V(v).properties('name')
+g.V(v).values('name') <8>
+----
+
+<1> A vertex can have zero or more properties with the same key associated with it.
+<2> If a property is added with a cardinality of `Cardinality.list`, an additional property with the provided key will be added.
+<3> A vertex property can have standard key/value properties attached to it.
+<4> Vertex property removal is identical to property removal.
+<5> Gets the meta-properties of each vertex property.
+<6> A vertex property can have any number of key/value properties attached to it.
+<7> `property(...)` will remove all existing key'd properties before adding the new single property (see `VertexProperty.Cardinality`).
+<8> If only the value of a property is needed, then `values()` can be used.
+
+If the concept of vertex properties is difficult to grasp, then it may be best to think of vertex properties in terms
+of "literal vertices." A vertex can have an edge to a "literal vertex" that has a single value key/value -- e.g.
+"value=okram." The edge that points to that literal vertex has an edge-label of "name." The properties on the edge
+represent the literal vertex's properties. The "literal vertex" can not have any other edges to it (only one from the
+associated vertex).
+
+[[the-crew-toy-graph]]
+TIP: A toy graph demonstrating all of the new TinkerPop graph structure features is available at
+`TinkerFactory.createTheCrew()` and `data/tinkerpop-crew*`. This graph demonstrates multi-properties and meta-properties.
+Its full schema and example traversals are documented in the
+link:https://tinkerpop.apache.org/docs/x.y.z/data/#the-crew[Crew Graph] section of the TinkerPop Sample Data reference.
+
+.TinkerPop Crew
+image::the-crew-graph.png[width=685]
+
+[gremlin-groovy,theCrew]
+----
+g.V().as('a').
+      properties('location').as('b').
+      hasNot('endTime').as('c').
+      select('a','b','c').by('name').by(value).by('startTime') // determine the current location of each person
+g.V().has('name','gremlin').inE('uses').
+      order().by('skill',asc).as('a').
+      outV().as('b').
+      select('a','b').by('skill').by('name') // rank the users of gremlin by their skill level
+----
+
+[[vertex-labels]]
+=== Vertex Labels
+
+In the simplest property graph model, a vertex has exactly one immutable label assigned at creation, the same as an
+edge. This single-label form is sufficient whenever an element has one clear type, and it is the most portable
+choice across providers. TinkerPop also allows graph providers to optionally support a different vertex label
+cardinality, in which case a vertex may carry multiple labels, or none at all. Multiple labels are useful when an
+element legitimately belongs to more than one type at once (a vertex that is both a `Person` and an `Employee`) or when
+the roles an element plays change over time, so that a label can be added or removed as a role is gained or lost. They
+can also serve as coarse-grained classifications that a provider can index and query more efficiently than an ordinary
+property. Attributes that are fine-grained, or that change frequently without really describing the element's type, are
+still better modeled as properties. Whether a graph supports multiple labels, and to what degree, is governed by its
+configured `LabelCardinality`:
+
+* `ONE` fixes exactly one immutable label per vertex
+* `ONE_OR_MORE` requires at least one label but permits additional labels to be added or removed
+* `ZERO_OR_MORE` allows a vertex to have any number of labels including none
+
+It is up to each graph provider to decide which of these cardinalities it supports and, where more than one is
+supported, what its default is or whether the choice is left to the user to configure. See the
+<<label-step,label()>>, <<labels-step,labels()>>, <<addlabel-step,addLabel()>>, and
+<<droplabel-step,dropLabel()>> steps for traversal access.
+
+[[the-zoo-toy-graph]]
+TIP: A toy graph demonstrating multi-label vertices alongside a variety of property types is available at
+`TinkerFactory.createTheZoo()` and `data/tinkerpop-zoo.json` (GraphSON 4.0). "The Zoo" requires a graph supporting a
+`LabelCardinality` of `ONE_OR_MORE` or `ZERO_OR_MORE`. The dataset is subject to change, so for now it is only
+available in this one format rather than the full complement of formats provided for the other toy graphs.
+
+.The Zoo
+image::the-zoo-graph.png[width=685]
+
+"The Zoo" models animals, their habitats, and the people who care for them. Animals carry the "animal" label plus
+any number of descriptive labels - such as "aquatic", "nocturnal", or "endangered" - reflecting the traits that
+apply to them, which is where the graph's multi-label vertices come into play:
+
+[gremlin-groovy,theZoo]
+----
+g.V().hasLabel('animal').valueMap('name','species')
+g.V().has('name','tux').labels()                                     <1>
+g.V().hasLabel('endangered').values('name')                          <2>
+g.V().has('name','tux').out('livesIn').values('name','biome')        <3>
+----
+
+<1> `tux` carries several labels at once - "animal", "bird", "aquatic", and "endangered" - since vertex labels are
+not limited to exactly one for this graph.
+<2> Filtering by a single label, such as "endangered", surfaces every animal that carries it, regardless of what
+other labels are also present.
+<3> Find the name and biome of the habitat that "tux" lives in.
+
+[[nullable-property-values]]
+=== Nullable Property Values
+
+Ordinarily, setting a property to `null` is equivalent to removing it, since a property with no value does not
+exist. Some graph providers optionally support storing an explicit `null` as a property value instead, so that the
+property continues to exist but with no assigned value. See a provider's documentation or check
+`Graph.Features.VertexFeatures#supportsNullPropertyValues()` (and the analogous `Edge`/`VertexProperty` features) to
+determine whether this variance is supported.
+
+== Graph Variables
+
+`Graph.Variables` are key/value pairs associated with the graph itself -- in essence, a `Map<String,Object>`. These
+variables are intended to store metadata about the graph. Example use cases include:
+
+ * *Schema information*: What do the namespace prefixes resolve to and when was the schema last modified?
+ * *Global permissions*: What are the access rights for particular groups?
+ * *System user information*: Who are the admins of the system?
+
+An example of graph variables in use is presented below:
+
+[gremlin-groovy]
+----
+graph = TinkerGraph.open()
+graph.variables()
+graph.variables().set('systemAdmins',['stephen','peter','pavel'])
+graph.variables().set('systemUsers',['matthias','marko','josh'])
+graph.variables().keys()
+graph.variables().get('systemUsers')
+graph.variables().get('systemUsers').get()
+graph.variables().remove('systemAdmins')
+graph.variables().keys()
+----
+
+IMPORTANT: Graph variables are not intended to be subject to heavy, concurrent mutation nor to be used in complex
+computations. The intention is to have a location to store data about the graph for administrative purposes.
+
+WARNING: Attempting to set graph variables in a reference graph will not promote them to the remote graph. Typically,
+a reference graph has immutable features and will not support this features.
+
+== Namespace Conventions
+
+End users, <<implementations,graph system providers>>, <<graphcomputer,`GraphComputer`>> algorithm designers,
+<<gremlin-plugins,GremlinPlugin>> creators, etc. all leverage properties on elements to store information. There are
+a few conventions that should be respected when naming property keys to ensure that conflicts between these
+stakeholders do not conflict.
+
+* End users are granted the _flat namespace_ (e.g. `name`, `age`, `location`) to key their properties and label their elements.
+* Graph system providers are granted the _hidden namespace_ (e.g. `~metadata`) to key their properties and labels.
+Data keyed as such is only accessible via the graph system implementation and no other stakeholders are granted read
+nor write access to data prefixed with "~" (see `Graph.Hidden`). Test coverage and exceptions exist to ensure that
+graph systems respect this hard boundary.
+* <<vertexprogram,`VertexProgram`>> and <<mapreduce,`MapReduce`>> developers should leverage _qualified namespaces_
+particular to their domain (e.g. `mydomain.myvertexprogram.computedata`).
+* `GremlinPlugin` creators should prefix their plugin name with their domain (e.g. `mydomain.myplugin`).
+
+IMPORTANT: TinkerPop uses `tinkerpop.` and `gremlin.` as the prefixes for provided strategies, vertex programs, map
+reduce implementations, and plugins.
+
+The only truly protected namespace is the _hidden namespace_ provided to graph systems. From there, it's up to
+engineers to respect the namespacing conventions presented.

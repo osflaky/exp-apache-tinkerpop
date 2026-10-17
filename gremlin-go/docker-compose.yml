@@ -1,0 +1,87 @@
+#    Licensed to the Apache Software Foundation (ASF) under one
+#    or more contributor license agreements.  See the NOTICE file
+#    distributed with this work for additional information
+#    regarding copyright ownership.  The ASF licenses this file
+#    to you under the Apache License, Version 2.0 (the
+#    "License"); you may not use this file except in compliance
+#    with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#    Unless required by applicable law or agreed to in writing,
+#    software distributed under the License is distributed on an
+#    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+#    KIND, either express or implied.  See the License for the
+#    specific language governing permissions and limitations
+#    under the License.
+
+services:
+
+  gremlin-server-test:
+    container_name: gremlin-server-test
+    image: tinkerpop/gremlin-server-test:${GREMLIN_SERVER}
+    build:
+      context: ../
+      dockerfile: docker/gremlin-test-server/Dockerfile
+      args:
+        - GREMLIN_SERVER=${GREMLIN_SERVER}
+    ports:
+      - "45940:45940"
+      - "45941:45941"
+    volumes:
+      - ${HOME}/.groovy:/root/.groovy
+      - ${HOME}/.m2:/root/.m2
+      - ${ABS_PROJECT_HOME}/gremlin-test/target:/opt/gremlin-test
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"gremlin\":\"g.inject(1)\"}' http://localhost:45940" ]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  gremlin-socket-server-test-go:
+    container_name: gremlin-socket-server-test-go
+    image: tinkerpop/gremlin-socket-server:${GREMLIN_SERVER}
+    build:
+      context: ../
+      dockerfile: gremlin-tools/gremlin-socket-server/Dockerfile
+      args:
+        - SOCKET_SERVER_DIR=gremlin-tools/gremlin-socket-server/target/
+        - SOCKET_SERVER_VERSION=${GREMLIN_SERVER}
+    ports:
+      - "45943:45943"
+      - "45944:45944"
+
+  gremlin-go-integration-tests:
+    container_name: gremlin-go-integration-tests
+    image: golang:1.25
+    volumes:
+      - .:/go_app
+      - ../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features:/gremlin-test
+      - ../docker/gremlin-test-server:/go_app/gremlin-test-server
+    environment:
+      - CUCUMBER_FEATURE_FOLDER=/gremlin-test
+      - GREMLIN_SERVER_URL=http://gremlin-server-test:45940/gremlin
+      - GREMLIN_SERVER_BASIC_AUTH_URL=https://gremlin-server-test:45941/gremlin
+      - GREMLIN_SOCKET_SERVER_URL=http://gremlin-socket-server-test-go:45943/gremlin
+      - GREMLIN_SOCKET_SERVER_PROXY_URL=http://gremlin-socket-server-test-go:45944
+      - RUN_INTEGRATION_TESTS=true
+      - RUN_INTEGRATION_WITH_ALIAS_TESTS=true
+      - RUN_BASIC_AUTH_INTEGRATION_TESTS=true
+      - VERTEX_LABEL=go-example
+    working_dir: /go_app
+    command: >
+      bash -c "go install github.com/gotesttools/gotestfmt/v2/cmd/gotestfmt@latest
+      && go build ./...
+      && go test -v -json ./... -race -covermode=atomic -coverprofile=\"coverage.out\" -coverpkg=./... | gotestfmt
+      && PARAMETERIZE=true go test -v ./driver/cucumber/... -run TestCucumberFeatures
+      && echo 'Running examples...'
+      && go run examples/basic_gremlin.go
+      && go run examples/connections.go
+      && go run examples/modern_traversals.go
+      && echo 'All examples completed successfully'"
+    depends_on:
+      gremlin-server-test:
+        condition: service_healthy
+      gremlin-socket-server-test-go:
+        condition: service_started

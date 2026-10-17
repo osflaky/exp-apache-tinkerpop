@@ -1,0 +1,109 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+services:
+
+  gremlin-server-test-python:
+    container_name: gremlin-server-test-python
+    image: tinkerpop:gremlin-server-test-${GREMLIN_SERVER}
+    hostname: gremlin-server-test
+    build:
+      context: ../
+      dockerfile: docker/gremlin-test-server/Dockerfile
+      args:
+        - GREMLIN_SERVER=${GREMLIN_SERVER}
+    ports:
+      - "45940:45940"
+      - "45941:45941"
+    volumes:
+      - ${HOME}/.groovy:/root/.groovy
+      - ${HOME}/.m2:/root/.m2
+      - ${ABS_PROJECT_HOME}/gremlin-test/target:/opt/gremlin-test
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"gremlin\":\"g.inject(1)\"}' http://localhost:45940" ]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  gremlin-socket-server-test-python:
+    container_name: gremlin-socket-server-test-python
+    image: tinkerpop/gremlin-socket-server:${GREMLIN_SERVER}
+    build:
+      context: ../
+      dockerfile: gremlin-tools/gremlin-socket-server/Dockerfile
+      args:
+        - SOCKET_SERVER_DIR=gremlin-tools/gremlin-socket-server/target/
+        - SOCKET_SERVER_VERSION=${GREMLIN_SERVER}
+    ports:
+      - "45943:45943"
+      - "45944:45944"
+
+  gremlin-python-integration-tests:
+    container_name: gremlin-python-integration-tests
+    image: python:${PYTHON_VERSION:-3.10}
+    volumes:
+      - ${BUILD_DIR:-./src/main/python}:/python_app
+      - ../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features:/python_app/gremlin-test/features
+      - ../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/structure/io/graphbinary:/python_app/gremlin-test/graphbinary
+      - ../docker/gremlin-test-server:/python_app/gremlin-test-server
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+      - GREMLIN_SERVER_URL=http://gremlin-server-test-python:{}/gremlin
+      - GREMLIN_SERVER_BASIC_AUTH_URL=https://gremlin-server-test-python:{}/gremlin
+      - GREMLIN_SOCKET_SERVER_URL=http://gremlin-socket-server-test-python:45943/gremlin
+      - GREMLIN_SOCKET_SERVER_PROXY_URL=http://gremlin-socket-server-test-python:45944
+      - IO_TEST_DIRECTORY=/python_app/gremlin-test/graphbinary/
+      - PYTEST_ARGS=${PYTEST_ARGS:-}
+      - RADISH_ARGS=${RADISH_ARGS:-}
+    working_dir: /python_app
+    command: >
+      bash -c "pip install .[test]
+      && if [ -z \"$PYTEST_ARGS\" ] && [ -z \"$RADISH_ARGS\" ]; then
+        pytest && 
+        radish --junit-xml python-reports/feature-graphbinary-bulked-result.xml -f dots -e -t -b ./tests/feature ./gremlin-test --user-data='serializer=application/vnd.graphbinary-v4.0' --user-data='bulked=true' && 
+        radish --junit-xml python-reports/feature-graphbinary-params-result.xml -f dots -e -t -b ./tests/feature ./gremlin-test --user-data='serializer=application/vnd.graphbinary-v4.0' --user-data='parameterize=true' && 
+        radish --junit-xml python-reports/feature-graphbinary-result.xml -f dots -e -t -b ./tests/feature ./gremlin-test --user-data='serializer=application/vnd.graphbinary-v4.0' ;
+      elif [ -n \"$PYTEST_ARGS\" ]; then
+        pytest $PYTEST_ARGS ;
+      elif [ -n \"$RADISH_ARGS\" ]; then
+        radish --junit-xml python-reports/feature-graphbinary-bulked-result.xml -f dots -e -t -b ./tests/feature ./gremlin-test --user-data='serializer=application/vnd.graphbinary-v4.0' --user-data='bulked=true' $RADISH_ARGS &&
+        radish --junit-xml python-reports/feature-graphbinary-params-result.xml -f dots -e -t -b ./tests/feature ./gremlin-test --user-data='serializer=application/vnd.graphbinary-v4.0' --user-data='parameterize=true' $RADISH_ARGS &&
+        radish --junit-xml python-reports/feature-graphbinary-result.xml -f dots -e -t -b ./tests/feature ./gremlin-test --user-data='serializer=application/vnd.graphbinary-v4.0' $RADISH_ARGS ;
+      fi
+      && pip install .
+      && echo 'Running examples...'
+      && python3 examples/basic_gremlin.py
+      && python3 examples/connections.py
+      && python3 examples/modern_traversals.py
+      && echo 'All examples completed successfully';
+      EXIT_CODE=$$?; chown -R `stat -c "%u:%g" .` .; exit $$EXIT_CODE"
+    depends_on:
+      gremlin-server-test-python:
+        condition: service_healthy
+      gremlin-socket-server-test-python:
+        condition: service_started
+
+  gremlin-python-package:
+    container_name: gremlin-python-package
+    image: python:${PYTHON_VERSION:-3.10}
+    volumes:
+      - ${PACKAGE_DIR:-./src/main/python}:/python_package
+    working_dir: /python_package
+    command: >
+      bash -c "pip install build && python -m build;
+      EXIT_CODE=$$?; chown -R `stat -c "%u:%g" .` .; exit $$EXIT_CODE"

@@ -1,0 +1,261 @@
+/*
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+*/
+
+package gremlingo
+
+import (
+	"fmt"
+	"reflect"
+	"strings"
+)
+
+// Graph is used to store the graph.
+// In-memory collections of vertices and edges, typically produced by a subgraph()
+// traversal. Maps are keyed by element id.
+type Graph struct {
+	Vertices map[interface{}]*Vertex
+	Edges    map[interface{}]*Edge
+}
+
+// NewGraph creates a new empty Graph with initialized Vertices and Edges maps.
+func NewGraph() *Graph {
+	return &Graph{
+		Vertices: make(map[interface{}]*Vertex),
+		Edges:    make(map[interface{}]*Edge),
+	}
+}
+
+// String returns the string representation of the graph.
+func (g *Graph) String() string {
+	return fmt.Sprintf("graph[vertices:%d edges:%d]", len(g.Vertices), len(g.Edges))
+}
+
+// Element is the base structure for both Vertex and Edge.
+// The inherited identifier must be unique to the inheriting classes.
+type Element struct {
+	Id         interface{}
+	Label      string
+	Properties interface{}
+}
+
+// Vertex contains a single Vertex which has a Label and an Id.
+type Vertex struct {
+	Element
+	Labels []string // All labels; Element.Label still holds first label for compat
+}
+
+// Edge links two Vertex structs along with its Property Objects. An edge has both a direction and a Label.
+type Edge struct {
+	Element
+	OutV   Vertex
+	InV    Vertex
+	Labels []string // All labels
+}
+
+// VertexProperty is similar to property in that it denotes a key/value pair associated with a Vertex, but is different
+// in that it also represents an entity that is an Element and can have properties of its own.
+type VertexProperty struct {
+	Element
+	Key    string // This is the Label of Vertex.
+	Value  interface{}
+	Vertex Vertex // Vertex that owns the property.
+}
+
+// Property denotes a Key/Value pair associated with an Edge. A property can be empty.
+type Property struct {
+	Key     string
+	Value   interface{}
+	Element Element
+}
+
+// Path denotes a particular walk through a Graph as defined by a traversal.
+// A list of Labels and a list of Objects is maintained in the path.
+// The list of Labels are the Labels of the steps traversed, and the Objects are the Objects that are traversed.
+type Path struct {
+	Labels  []Set
+	Objects []interface{}
+}
+
+// String returns the string representation of the vertex.
+func (v *Vertex) String() string {
+	return fmt.Sprintf("v[%v]", v.Id)
+}
+
+// PropertyMap groups the properties of this Vertex by their Key. The Properties field is expected to hold a
+// []interface{} of *VertexProperty as produced during deserialization. Multi-valued properties are returned as
+// multiple entries in the slice associated with a Key. An empty (non-nil) map is returned when there are no
+// properties or when Properties is not of the expected type.
+func (v *Vertex) PropertyMap() map[string][]*VertexProperty {
+	propertyMap := make(map[string][]*VertexProperty)
+	properties, ok := v.Properties.([]interface{})
+	if !ok {
+		return propertyMap
+	}
+	for _, p := range properties {
+		if vp, ok := p.(*VertexProperty); ok {
+			propertyMap[vp.Key] = append(propertyMap[vp.Key], vp)
+		}
+	}
+	return propertyMap
+}
+
+// String returns the string representation of the edge.
+func (e *Edge) String() string {
+	return fmt.Sprintf("e[%v][%v-%s->%v]", e.Id, e.OutV.Id, e.Label, e.InV.Id)
+}
+
+// PropertyMap groups the properties of this Edge by their Key. The Properties field is expected to hold a
+// []interface{} of *Property as produced during deserialization. Multi-valued properties are returned as
+// multiple entries in the slice associated with a Key. An empty (non-nil) map is returned when there are no
+// properties or when Properties is not of the expected type.
+func (e *Edge) PropertyMap() map[string][]*Property {
+	propertyMap := make(map[string][]*Property)
+	properties, ok := e.Properties.([]interface{})
+	if !ok {
+		return propertyMap
+	}
+	for _, p := range properties {
+		if prop, ok := p.(*Property); ok {
+			propertyMap[prop.Key] = append(propertyMap[prop.Key], prop)
+		}
+	}
+	return propertyMap
+}
+
+// String returns the string representation of the vertex property.
+func (vp *VertexProperty) String() string {
+	return fmt.Sprintf("vp[%s->%v]", vp.Label, vp.Value)
+}
+
+// PropertyMap groups the meta-properties of this VertexProperty by their Key. The Properties field is expected to
+// hold a []interface{} of *Property as produced during deserialization. Multi-valued properties are returned as
+// multiple entries in the slice associated with a Key. An empty (non-nil) map is returned when there are no
+// properties or when Properties is not of the expected type.
+func (vp *VertexProperty) PropertyMap() map[string][]*Property {
+	propertyMap := make(map[string][]*Property)
+	properties, ok := vp.Properties.([]interface{})
+	if !ok {
+		return propertyMap
+	}
+	for _, p := range properties {
+		if prop, ok := p.(*Property); ok {
+			propertyMap[prop.Key] = append(propertyMap[prop.Key], prop)
+		}
+	}
+	return propertyMap
+}
+
+// String returns the string representation of the property.
+func (p *Property) String() string {
+	return fmt.Sprintf("p[%s->%v]", p.Key, p.Value)
+}
+
+// String returns the string representation of the path.
+func (p *Path) String() string {
+	return fmt.Sprintf("path[%s]", strings.Trim(strings.Join(strings.Fields(fmt.Sprint(p.Objects)), ", "), "[]"))
+}
+
+// GetPathObject returns the Value that corresponds to the Key for the Path and error if the Value is not present or cannot be retrieved.
+func (p *Path) GetPathObject(key string) (interface{}, error) {
+	if len(p.Objects) != len(p.Labels) {
+		return nil, newError(err0301GetPathObjectInvalidPathUnequalLengthsError)
+	}
+	var objectList []interface{}
+	var object interface{}
+	for i, labelSet := range p.Labels {
+		for _, label := range labelSet.ToSlice() {
+			// Sets in labels can only contain string types
+			if reflect.TypeOf(label).Kind() != reflect.String {
+				return nil, newError(err0302GetPathObjectInvalidPathNonStringLabelError)
+			}
+			if label == key {
+				if object == nil {
+					object = p.Objects[i]
+				} else if objectList != nil {
+					objectList = append(objectList, p.Objects[i])
+				} else {
+					objectList = []interface{}{object, p.Objects[i]}
+				}
+			}
+		}
+	}
+	if objectList != nil {
+		return objectList, nil
+	} else if object != nil {
+		return object, nil
+	} else {
+		return nil, newError(err0303GetPathNoLabelFoundError, key)
+	}
+}
+
+// Set describes the necessary methods that need to be implemented for Gremlin-Go to recognize for use as a Gremlin Set.
+type Set interface {
+	// ToSlice is the only method that needs to be implemented in order for a custom Set to operate properly.
+	// ToSlice must return a slice that contains all the elements of the underlying Set with no duplicates.
+	ToSlice() []interface{}
+}
+
+// SimpleSet is a basic implementation of a Set for use with Gremlin-Go.
+type SimpleSet struct {
+	objects []interface{}
+}
+
+// ToSlice must return a slice that contains all the elements of the underlying Set with no duplicates.
+func (s *SimpleSet) ToSlice() []interface{} {
+	return s.objects
+}
+
+// Add adds an item to the SimpleSet only if it is not already a part of it.
+func (s *SimpleSet) Add(val interface{}) {
+	if !s.Contains(val) {
+		s.objects = append(s.objects, val)
+	}
+}
+
+// Remove removes a value from the SimpleSet if it is in the set according to Golang equality operator rules.
+func (s *SimpleSet) Remove(val interface{}) {
+	for i, obj := range s.objects {
+		if val == obj {
+			// Deletion does not maintain ordering
+			s.objects[i] = s.objects[len(s.objects)-1]
+			s.objects = s.objects[:len(s.objects)-1]
+			break
+		}
+	}
+}
+
+// Contains checks if a value is contained in the SimpleSet or not.
+// Items are considered already contained in the set according to Golang equality operator rules.
+func (s *SimpleSet) Contains(val interface{}) bool {
+	for _, entry := range s.ToSlice() {
+		if val == entry {
+			return true
+		}
+	}
+	return false
+}
+
+// NewSimpleSet creates a new SimpleSet containing all passed in args with duplicates excluded according to Golang equality operator rules.
+func NewSimpleSet(args ...interface{}) *SimpleSet {
+	s := &SimpleSet{}
+	for _, arg := range args {
+		s.Add(arg)
+	}
+	return s
+}

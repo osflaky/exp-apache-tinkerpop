@@ -1,0 +1,277 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+import concurrent.futures
+from collections import namedtuple
+import os
+import ssl
+import pytest
+import logging
+import queue
+
+from gremlin_python.driver import serializer
+from gremlin_python.driver.client import Client
+from gremlin_python.driver.connection import Connection
+from gremlin_python.driver.driver_remote_connection import DriverRemoteConnection
+from gremlin_python.driver.serializer import GraphBinarySerializersV4
+from gremlin_python.driver.auth import basic, sigv4
+
+"""HTTP server testing variables"""
+gremlin_server_url = os.environ.get('GREMLIN_SERVER_URL', 'http://localhost:{}/gremlin')
+gremlin_basic_auth_url = os.environ.get('GREMLIN_SERVER_BASIC_AUTH_URL', 'https://localhost:{}/gremlin')
+anonymous_url = gremlin_server_url.format(45940)
+basic_url = gremlin_basic_auth_url.format(45941)
+
+verbose_logging = False
+
+# Shared namedtuple used by remote_connection_with_registry fixture and its tests.
+RegistryPoint = namedtuple('RegistryPoint', ['x', 'y'])
+# Shared namedtuple used by remote_connection_with_primitive_registry fixture and its tests.
+RegistryUint32 = namedtuple('RegistryUint32', ['value'])
+
+
+@pytest.fixture
+def registry_point_class():
+    return RegistryPoint
+
+
+@pytest.fixture
+def registry_uint32_class():
+    return RegistryUint32
+
+logging.basicConfig(format='%(asctime)s [%(levelname)8s] [%(filename)15s:%(lineno)d - %(funcName)10s()] - %(message)s',
+                    level=logging.DEBUG if verbose_logging else logging.INFO)
+
+"""
+Tests below are for the HTTP server with GraphBinaryV4
+"""
+@pytest.fixture
+def connection(request):
+    executor = concurrent.futures.ThreadPoolExecutor(5)
+    pool = queue.Queue()
+    try:
+        conn = Connection(anonymous_url, 'gmodern',
+                          executor, pool,
+                          response_serializer=GraphBinarySerializersV4(),
+                          auth=basic('stephen', 'password'))
+    except OSError:
+        executor.shutdown()
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            executor.shutdown()
+            conn.close()
+
+        request.addfinalizer(fin)
+        return conn
+
+
+@pytest.fixture
+def client(request):
+    try:
+        client = Client(anonymous_url, 'gmodern')
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            client.close()
+
+        request.addfinalizer(fin)
+        return client
+
+
+@pytest.fixture(params=['basic'])
+def authenticated_client(request):
+    try:
+        if request.param == 'basic':
+            # turn off certificate verification for testing purposes only
+            ssl_opts = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            ssl_opts.verify_mode = ssl.CERT_NONE
+            client = Client(basic_url, 'gmodern',
+                            auth=basic('stephen', 'password'),
+                            ssl=ssl_opts)
+        else:
+            raise ValueError("Invalid authentication option - " + request.param)
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            client.close()
+
+        request.addfinalizer(fin)
+        return client
+
+
+@pytest.fixture
+def graphbinary_serializer_v4(request):
+    return GraphBinarySerializersV4()
+
+
+@pytest.fixture
+def remote_connection(request):
+    try:
+        remote_conn = DriverRemoteConnection(anonymous_url, 'gmodern',
+                                             response_serializer=serializer.GraphBinarySerializersV4())
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            remote_conn.close()
+
+        request.addfinalizer(fin)
+        return remote_conn
+
+
+@pytest.fixture
+def remote_connection_crew(request):
+    try:
+        remote_conn = DriverRemoteConnection(anonymous_url, 'gcrew')
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            remote_conn.close()
+
+        request.addfinalizer(fin)
+        return remote_conn
+
+
+# TODO: revisit once testing for multiple types of auth is enabled
+@pytest.fixture(params=['basic'])
+def remote_connection_authenticated(request):
+    try:
+        if request.param == 'basic':
+            # turn off certificate verification for testing purposes only
+            ssl_opts = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            ssl_opts.verify_mode = ssl.CERT_NONE
+            remote_conn = DriverRemoteConnection(basic_url, 'gmodern',
+                                                 auth=basic('stephen', 'password'),
+                                                 ssl=ssl_opts)
+        else:
+            raise ValueError("Invalid authentication option - " + request.param)
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            remote_conn.close()
+
+        request.addfinalizer(fin)
+        return remote_conn
+
+
+@pytest.fixture(params=['graphbinaryv4'])
+def invalid_alias_remote_connection(request):
+    try:
+        if request.param == 'graphbinaryv4':
+            remote_conn = DriverRemoteConnection(anonymous_url, 'does_not_exist')
+        else:
+            raise ValueError("Invalid serializer option - " + request.param)
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            remote_conn.close()
+
+        request.addfinalizer(fin)
+        return remote_conn
+
+
+@pytest.fixture()
+def remote_connection_with_interceptor(request):
+    try:
+        remote_conn = DriverRemoteConnection(anonymous_url, 'gmodern',
+                                             interceptors=mutating_interceptor)
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            remote_conn.close()
+
+        request.addfinalizer(fin)
+        return remote_conn
+
+
+@pytest.fixture()
+def client_with_interceptor(request):
+    try:
+        client = Client(anonymous_url, 'gmodern',
+                        interceptors=mutating_interceptor)
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            client.close()
+
+        request.addfinalizer(fin)
+        return client
+
+
+@pytest.fixture
+def remote_connection_with_registry(request):
+    from gremlin_python.structure.graph import PDTRegistry
+
+    registry = PDTRegistry()
+    registry.register('RegistryPoint',
+                      deserialize_fn=lambda fields: RegistryPoint(x=fields['x'], y=fields['y']),
+                      serialize_fn=lambda p: {'x': p.x, 'y': p.y},
+                      target_class=RegistryPoint)
+    try:
+        remote_conn = DriverRemoteConnection(anonymous_url, 'gmodern', pdt_registry=registry)
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            remote_conn.close()
+
+        request.addfinalizer(fin)
+        return remote_conn
+
+
+def mutating_interceptor(http_request):
+    """Interceptor that replaces the gremlin query with g.inject(2) for testing."""
+    from gremlin_python.driver.request import RequestMessage
+    if isinstance(http_request.body, RequestMessage):
+        http_request.body = RequestMessage(fields={"g": "g"}, gremlin="g.inject(2)")
+
+
+@pytest.fixture
+def remote_connection_with_primitive_registry(request):
+    from gremlin_python.structure.graph import PDTRegistry
+
+    registry = PDTRegistry()
+    registry.register_primitive('Uint32',
+                                from_value=lambda v: RegistryUint32(value=int(v)),
+                                to_value=lambda u: str(u.value),
+                                target_class=RegistryUint32)
+    try:
+        remote_conn = DriverRemoteConnection(anonymous_url, 'gmodern', pdt_registry=registry)
+    except OSError:
+        pytest.skip('Gremlin Server is not running')
+    else:
+        def fin():
+            remote_conn.close()
+
+        request.addfinalizer(fin)
+        return remote_conn
+
+
+def json_interceptor(request):
+        request['headers']['content-type'] = "application/json"
+        request['payload'] = dumps({"gremlin": "g.inject(2)", "g": "g"})
+        return request

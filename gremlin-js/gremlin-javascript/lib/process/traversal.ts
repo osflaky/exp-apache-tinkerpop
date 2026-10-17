@@ -1,0 +1,620 @@
+/*
+ *  Licensed to the Apache Software Foundation (ASF) under one
+ *  or more contributor license agreements.  See the NOTICE file
+ *  distributed with this work for additional information
+ *  regarding copyright ownership.  The ASF licenses this file
+ *  to you under the Apache License, Version 2.0 (the
+ *  "License"); you may not use this file except in compliance
+ *  with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing,
+ *  software distributed under the License is distributed on an
+ *  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ *  KIND, either express or implied.  See the License for the
+ *  specific language governing permissions and limitations
+ *  under the License.
+ */
+
+/**
+ * @author Jorge Bay Gondra
+ */
+
+import { Graph } from '../structure/graph.js';
+import { TraversalStrategies } from './traversal-strategy.js';
+import GremlinLang from './gremlin-lang.js';
+
+const itemDone: IteratorResult<any, null> = Object.freeze({ value: null, done: true }) as any;
+const asyncIteratorSymbol = Symbol.asyncIterator || Symbol('@@asyncIterator');
+
+export class Traversal {
+  /** @internal Async results stream set by RemoteStrategy */
+  _resultsStream: AsyncGenerator<any> | null = null;
+  /** @internal Buffered traverser for bulk expansion and hasNext peek */
+  private _currentTraverser: Traverser | null = null;
+  /** Trailing response status from the server, populated after iteration completes. */
+  private _status: { code: number; message: string | null; exception: string | null } | null = null;
+  sideEffects?: any = null;
+  private _traversalStrategiesPromise: Promise<void> | null = null;
+  private _done = false;
+
+  constructor(
+    public graph: Graph | null,
+    public traversalStrategies: TraversalStrategies | null,
+    public gremlinLang: GremlinLang = new GremlinLang(),
+  ) {}
+
+  /**
+   * Async iterable method implementation.
+   */
+  [asyncIteratorSymbol]() {
+    return this;
+  }
+
+  /** @returns {GremlinLang} */
+  getGremlinLang(): GremlinLang {
+    return this.gremlinLang;
+  }
+
+  /**
+   * Gets the trailing response status from the server.
+   * Available after the traversal has been fully iterated (via toList(), iterate(), or manual iteration).
+   * Returns null if the traversal has not completed.
+   * @returns {{ code: number, message: string | null, exception: string | null } | null}
+   */
+  getStatus() {
+    return this._status;
+  }
+
+  /**
+   * Returns an Array containing the traverser objects.
+   * @returns {Promise.<Array>}
+   */
+  async toList<T>(): Promise<T[]> {
+    await this._applyStrategies();
+    const result: T[] = [];
+    while (true) {
+      const it = await this._getNext<T>();
+      if (it.done) break;
+      result.push(it.value);
+    }
+    return result;
+  }
+
+  /**
+   * Determines if there are any more items to iterate from the traversal.
+   * @returns {Promise.<boolean>}
+   */
+  async hasNext(): Promise<boolean> {
+    await this._applyStrategies();
+
+    // If we have a current traverser with remaining bulk, there's more
+    if (this._currentTraverser && this._currentTraverser.bulk > 0) {
+      return true;
+    }
+
+    if (this._done) return false;
+
+    // Try to pull the next item from the source to check
+    if (this._resultsStream) {
+      const { value, done } = await this._resultsStream.next();
+      if (done) {
+        this._done = true;
+        return false;
+      }
+      // Buffer it as a traverser for the next _getNext() call
+      this._currentTraverser = value instanceof Traverser ? value : new Traverser(value, 1);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Iterates all Traverser instances in the traversal.
+   * @returns {Promise}
+   */
+  async iterate(): Promise<void> {
+    this.gremlinLang.addStep('discard');
+    await this._applyStrategies();
+    while (true) {
+      const it = await this._getNext();
+      if (it.done) break;
+    }
+  }
+
+  /**
+   * Returns the next result from the traversal.
+   *
+   * When called without an argument, returns a Promise that resolves to an iterator
+   * item ({value, done}), following the async iterator protocol.
+   *
+   * When called with an amount, returns a Promise that resolves to an Array containing
+   * up to {@code amount} result values. The Array form is always used when an amount is
+   * supplied, including {@code next(1)}, which resolves to an Array of one value rather
+   * than a bare value, matching the behavior of next(n) in the other Gremlin language
+   * variants. If fewer results remain, the Array contains only those that remain, and an
+   * amount of zero or less yields an empty Array.
+   * @param {Number} [amount] The number of results to retrieve.
+   * @returns {Promise.<{value, done}>|Promise.<Array>}
+   */
+  next<T>(): Promise<IteratorResult<T, null>>;
+  next<T>(amount: number): Promise<T[]>;
+  async next<T>(amount?: number): Promise<IteratorResult<T, null> | T[]> {
+    await this._applyStrategies();
+    if (amount === undefined || amount === null) {
+      return this._getNext<T>();
+    }
+    const result: T[] = [];
+    for (let i = 0; i < amount; i++) {
+      const it = await this._getNext<T>();
+      if (it.done) {
+        break;
+      }
+      result.push(it.value);
+    }
+    return result;
+  }
+
+  /**
+   * Pull the next value, handling Traverser bulk expansion.
+   * @private
+   */
+  async _getNext<T>(): Promise<IteratorResult<T, null>> {
+    // Drain current traverser's bulk first
+    if (this._currentTraverser) {
+      if (this._currentTraverser.bulk > 0) {
+        this._currentTraverser.bulk--;
+        const value = this._currentTraverser.object;
+        if (this._currentTraverser.bulk <= 0) {
+          this._currentTraverser = null;
+        }
+        return { value, done: false };
+      }
+      this._currentTraverser = null;
+    }
+
+    // Streaming source path
+    if (this._resultsStream) {
+      if (this._done) return itemDone;
+
+      const { value, done } = await this._resultsStream.next();
+      if (done) {
+        this._done = true;
+        this._status = value ?? null;
+        return itemDone;
+      }
+
+      if (value instanceof Traverser) {
+        if (value.bulk > 0) {
+          value.bulk--;
+          const result = value.object;
+          if (value.bulk > 0) {
+            this._currentTraverser = value;
+          }
+          return { value: result, done: false };
+        }
+        return itemDone;
+      }
+
+      return { value, done: false };
+    }
+
+    return itemDone;
+  }
+
+  _applyStrategies() {
+    if (this._traversalStrategiesPromise) {
+      // Apply strategies only once
+      return this._traversalStrategiesPromise;
+    }
+    return (this._traversalStrategiesPromise = this.traversalStrategies?.applyStrategies(this) ?? Promise.resolve());
+  }
+
+  /**
+   * Returns step instructions during JSON serialization
+   * @returns {Array}
+   */
+  toJSON() {
+    return this.gremlinLang.getGremlin();
+  }
+
+  /**
+   * Returns the GremlinLang representation of the traversal
+   * @returns {String}
+   */
+  toString() {
+    return this.gremlinLang.getGremlin();
+  }
+}
+
+export class IO {
+  static get graphml() {
+    return 'graphml';
+  }
+
+  static get graphson() {
+    return 'graphson';
+  }
+
+  static get gryo() {
+    return 'gryo';
+  }
+
+  static get reader() {
+    return '~tinkerpop.io.reader';
+  }
+
+  static get registry() {
+    return '~tinkerpop.io.registry';
+  }
+
+  static get writer() {
+    return '~tinkerpop.io.writer';
+  }
+}
+
+// eslint-disable-next-line no-unused-vars
+class ConnectedComponent {
+  static get component() {
+    return 'gremlin.connectedComponentVertexProgram.component';
+  }
+
+  static get edges() {
+    return '~tinkerpop.connectedComponent.edges';
+  }
+
+  static get propertyName() {
+    return '~tinkerpop.connectedComponent.propertyName';
+  }
+}
+
+// eslint-disable-next-line no-unused-vars
+class ShortestPath {
+  static get distance() {
+    return '~tinkerpop.shortestPath.distance';
+  }
+
+  static get edges() {
+    return '~tinkerpop.shortestPath.edges';
+  }
+
+  static get includeEdges() {
+    return '~tinkerpop.shortestPath.includeEdges';
+  }
+
+  static get maxDistance() {
+    return '~tinkerpop.shortestPath.maxDistance';
+  }
+
+  static get target() {
+    return '~tinkerpop.shortestPath.target';
+  }
+}
+
+// eslint-disable-next-line no-unused-vars
+class PageRank {
+  static get edges() {
+    return '~tinkerpop.pageRank.edges';
+  }
+
+  static get propertyName() {
+    return '~tinkerpop.pageRank.propertyName';
+  }
+
+  static get times() {
+    return '~tinkerpop.pageRank.times';
+  }
+}
+
+// eslint-disable-next-line no-unused-vars
+class PeerPressure {
+  static get edges() {
+    return '~tinkerpop.peerPressure.edges';
+  }
+
+  static get propertyName() {
+    return '~tinkerpop.peerPressure.propertyName';
+  }
+
+  static get times() {
+    return '~tinkerpop.peerPressure.times';
+  }
+}
+
+export class P<T1 = any, T2 = any> {
+  /**
+   * Represents an operation.
+   */
+  constructor(
+    public operator: string,
+    public value: T1,
+    public other: T2,
+  ) {}
+
+  /**
+   * Returns the string representation of the instance.
+   * @returns {string}
+   */
+  toString() {
+    function formatValue(value: T1 | T2): string {
+      if (Array.isArray(value)) {
+        const acc = [];
+        for (const item of value) {
+          acc.push(formatValue(item));
+        }
+        return '[' + acc.join(', ') + ']';
+      }
+      if (value && typeof value === 'string') {
+        return `'${value}'`;
+      }
+      return String(value);
+    }
+
+    if (this.other === undefined || this.other === null) {
+      return this.operator + '(' + formatValue(this.value) + ')';
+    }
+    return this.operator + '(' + formatValue(this.value) + ', ' + formatValue(this.other) + ')';
+  }
+
+  and(arg?: any) {
+    return new P('and', this, arg);
+  }
+
+  or(arg?: any) {
+    return new P('or', this, arg);
+  }
+
+  static within(...args: any[]) {
+    if (args.length === 1 && Array.isArray(args[0])) {
+      return new P('within', args[0], null);
+    }
+    if (args.length === 1 && args[0] != null && typeof args[0].getGremlinLang === 'function') {
+      return new P('within', args[0], null);
+    }
+    return new P('within', args, null);
+  }
+
+  static without(...args: any[]) {
+    if (args.length === 1 && Array.isArray(args[0])) {
+      return new P('without', args[0], null);
+    }
+    if (args.length === 1 && args[0] != null && typeof args[0].getGremlinLang === 'function') {
+      return new P('without', args[0], null);
+    }
+    return new P('without', args, null);
+  }
+
+  /** @param {...Object} args */
+  static between(...args: any[]) {
+    return createP('between', args);
+  }
+
+  /** @param {...Object} args */
+  static eq(...args: any[]) {
+    return createP('eq', args);
+  }
+
+  /** @param {...Object} args */
+  static gt(...args: any[]) {
+    return createP('gt', args);
+  }
+
+  /** @param {...Object} args */
+  static gte(...args: any[]) {
+    return createP('gte', args);
+  }
+
+  /** @param {...Object} args */
+  static inside(...args: any[]) {
+    return createP('inside', args);
+  }
+
+  /** @param {...Object} args */
+  static lt(...args: any[]) {
+    return createP('lt', args);
+  }
+
+  /** @param {...Object} args */
+  static lte(...args: any[]) {
+    return createP('lte', args);
+  }
+
+  /** @param {...Object} args */
+  static neq(...args: any[]) {
+    return createP('neq', args);
+  }
+
+  /** @param {...Object} args */
+  static not(...args: any[]) {
+    return createP('not', args);
+  }
+
+  /** @param {...Object} args */
+  static outside(...args: any[]) {
+    return createP('outside', args);
+  }
+
+  /** @param {...Object} args */
+  static typeOf(...args: any[]) {
+    return createP('typeOf', args);
+  }
+
+  /** @param {...Object} args */
+  static test(...args: any[]) {
+    return createP('test', args);
+  }
+}
+
+function createP(operator: string, args: any) {
+  args.unshift(null, operator);
+  return new (Function.prototype.bind.apply(P, args))();
+}
+
+export class TextP<T1 = any, T2 = any> {
+  /**
+   * Represents an operation.
+   */
+  constructor(
+    public operator: string,
+    public value: T1,
+    public other: T2,
+  ) {}
+
+  /**
+   * Returns the string representation of the instance.
+   * @returns {string}
+   */
+  toString() {
+    function formatValue(value: any) {
+      if (value && typeof value === 'string') {
+        return `'${value}'`;
+      }
+      return value;
+    }
+
+    if (this.other === undefined) {
+      return this.operator + '(' + formatValue(this.value) + ')';
+    }
+    return this.operator + '(' + formatValue(this.value) + ', ' + formatValue(this.other) + ')';
+  }
+
+  and(arg: any) {
+    return new P('and', this, arg);
+  }
+
+  or(arg: any) {
+    return new P('or', this, arg);
+  }
+
+  /** @param {...Object} args */
+  static containing(...args: any[]) {
+    return createTextP('containing', args);
+  }
+
+  /** @param {...Object} args */
+  static endingWith(...args: any[]) {
+    return createTextP('endingWith', args);
+  }
+
+  /** @param {...Object} args */
+  static notContaining(...args: any[]) {
+    return createTextP('notContaining', args);
+  }
+
+  /** @param {...Object} args */
+  static notEndingWith(...args: any[]) {
+    return createTextP('notEndingWith', args);
+  }
+
+  /** @param {...Object} args */
+  static notStartingWith(...args: any[]) {
+    return createTextP('notStartingWith', args);
+  }
+
+  /** @param {...Object} args */
+  static startingWith(...args: any[]) {
+    return createTextP('startingWith', args);
+  }
+
+  /** @param {...Object} args */
+  static regex(...args: any[]) {
+    return createTextP('regex', args);
+  }
+
+  /** @param {...Object} args */
+  static notRegex(...args: any[]) {
+    return createTextP('notRegex', args);
+  }
+}
+
+function createTextP(operator: string, args: any) {
+  args.unshift(null, operator);
+  return new (Function.prototype.bind.apply(TextP, args))();
+}
+
+export class Traverser<T = any> {
+  constructor(
+    public object: T,
+    public bulk: number,
+  ) {
+    this.bulk = bulk || 1;
+  }
+}
+
+export class TraversalSideEffects {}
+
+export const withOptions = {
+  tokens: '~tinkerpop.valueMap.tokens',
+  none: 0,
+  ids: 1,
+  labels: 2,
+  keys: 4,
+  values: 8,
+  all: 15,
+  indexer: '~tinkerpop.index.indexer',
+  list: 0,
+  map: 1,
+};
+
+function toEnum(typeName: string, keys: string) {
+  const result: Record<string, EnumValue> = {};
+  keys.split(' ').forEach((k) => {
+    let jsKey = k;
+    if (jsKey === jsKey.toUpperCase()) {
+      jsKey = jsKey.toLowerCase();
+    }
+    result[jsKey] = new EnumValue(typeName, k);
+  });
+  return result;
+}
+
+const directionAlias = {
+  from_: 'out',
+  to: 'in',
+} as const;
+
+// for direction enums, maps the same EnumValue object to the enum aliases after creating them
+function toDirectionEnum(typeName: string, keys: string) {
+  const result = toEnum(typeName, keys);
+  Object.keys(directionAlias).forEach((k) => {
+    result[k] = result[directionAlias[k as keyof typeof directionAlias]];
+  });
+  return result;
+}
+
+function toGTypeEnum(typeName: string, keys: string) {
+  const result: { [key: string]: any } = {};
+  keys.split(' ').forEach((k) => {
+    result[k] = new EnumValue(typeName, k.toUpperCase());
+  });
+  return result;
+}
+
+export class EnumValue {
+  constructor(
+    public typeName: string,
+    public elementName: string,
+  ) {}
+
+  toString() {
+    return this.typeName + '.' + this.elementName;
+  }
+}
+
+export const barrier = toEnum('Barrier', 'normSack');
+export const cardinality = toEnum('Cardinality', 'list set single');
+export const column = toEnum('Column', 'keys values');
+export const direction = toDirectionEnum('Direction', 'BOTH IN OUT from_ to');
+export const dt = toEnum('DT', 'second minute hour day');
+export const gType = toGTypeEnum('GType', 'bigDecimal bigInt binary boolean byte char datetime double duration edge float graph int list long map null number path property set short string tree uuid vertex vproperty');
+export const gryoVersion = toEnum('GryoVersion', 'V1_0 V3_0');
+export const merge = toEnum('Merge', 'onCreate onMatch outV inV');
+export const operator = toEnum('Operator', 'addAll and assign div max min minus mult or sum sumLong');
+export const order = toEnum('Order', 'asc desc shuffle');
+export const pick = toEnum('Pick', 'any none unproductive');
+export const pop = toEnum('Pop', 'all first last mixed');
+export const scope = toEnum('Scope', 'global local');
+export const t = toEnum('T', 'id key label value');
+export const n = toEnum('N', 'byte_ short_ int_ long_ float_ double_ bigInt bigDecimal');

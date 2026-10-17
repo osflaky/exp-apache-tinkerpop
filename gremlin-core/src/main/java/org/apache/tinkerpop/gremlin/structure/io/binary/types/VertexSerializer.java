@@ -1,0 +1,86 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.tinkerpop.gremlin.structure.io.binary.types;
+
+import org.apache.commons.collections4.IteratorUtils;
+import org.apache.tinkerpop.gremlin.structure.Vertex;
+import org.apache.tinkerpop.gremlin.structure.io.Buffer;
+import org.apache.tinkerpop.gremlin.structure.io.binary.DataType;
+import org.apache.tinkerpop.gremlin.structure.io.binary.GraphBinaryReader;
+import org.apache.tinkerpop.gremlin.structure.io.binary.GraphBinaryWriter;
+import org.apache.tinkerpop.gremlin.structure.util.detached.DetachedVertex;
+import org.apache.tinkerpop.gremlin.structure.util.detached.DetachedVertexProperty;
+import org.apache.tinkerpop.gremlin.structure.util.reference.ReferenceVertex;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+
+/**
+ * @author Stephen Mallette (http://stephen.genoprime.com)
+ */
+public class VertexSerializer extends SimpleTypeSerializer<Vertex> {
+    public VertexSerializer() {
+        super(DataType.VERTEX);
+    }
+
+    @Override
+    protected Vertex readValue(final Buffer buffer, final GraphBinaryReader context) throws IOException {
+        final Object id = context.read(buffer);
+        // Read labels as List<String> for multi-label support
+        final List<String> labelList = context.readValue(buffer, List.class, false);
+        final List<DetachedVertexProperty> properties = context.read(buffer);
+
+        final DetachedVertex.Builder builder = DetachedVertex.build().setId(id);
+
+        if (labelList != null && !labelList.isEmpty()) {
+            if (labelList.size() == 1) {
+                builder.setLabel(labelList.get(0));
+            } else {
+                builder.setLabels(new LinkedHashSet<>(labelList));
+            }
+        }
+
+        if (properties != null) {
+            for (final DetachedVertexProperty vp : properties) {
+                builder.addProperty(vp);
+            }
+        }
+
+        return builder.create();
+    }
+
+    @Override
+    protected void writeValue(final Vertex value, final Buffer buffer, final GraphBinaryWriter context) throws IOException {
+        context.write(value.id(), buffer);
+        // Write all labels as List<String> for multi-label support.
+        // Empty list is valid for zero-label elements (ZERO_OR_MORE / ZERO_OR_ONE cardinality).
+        final java.util.Set<String> labels = value.labels();
+        context.writeValue(labels == null ? new ArrayList<>() : new ArrayList<>(labels), buffer, false);
+        if (value instanceof ReferenceVertex) {
+            context.write(null, buffer);
+        }
+        else {
+            final List<?> asList = IteratorUtils.toList(value.properties());
+            context.write(asList, buffer);
+        }
+    }
+}

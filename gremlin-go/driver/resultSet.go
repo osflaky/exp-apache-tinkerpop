@@ -1,0 +1,216 @@
+/*
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+*/
+
+package gremlingo
+
+import (
+	"sync"
+)
+
+const defaultCapacity = 1000
+
+// ResultSet interface to define the functions of a ResultSet.
+type ResultSet interface {
+	setAggregateTo(val string)
+	GetAggregateTo() string
+	IsEmpty() bool
+	Close()
+	Channel() chan *Result
+	addResult(result *Result)
+	One() (*Result, bool, error)
+	All() ([]*Result, error)
+	GetError() error
+	setError(error)
+}
+
+// channelResultSet Channel based implementation of ResultSet.
+type channelResultSet struct {
+	channel         chan *Result
+	aggregateTo     string
+	closed          bool
+	err             error
+	waitSignal      chan bool
+	channelMutex    sync.Mutex
+	waitSignalMutex sync.Mutex
+}
+
+func (channelResultSet *channelResultSet) sendSignal() {
+	// Lock wait
+	channelResultSet.waitSignalMutex.Lock()
+	defer channelResultSet.waitSignalMutex.Unlock()
+	if channelResultSet.waitSignal != nil {
+		channelResultSet.waitSignal <- true
+		channelResultSet.waitSignal = nil
+	}
+}
+
+// GetError returns error from the channelResultSet.
+func (channelResultSet *channelResultSet) GetError() error {
+	return channelResultSet.err
+}
+
+func (channelResultSet *channelResultSet) setError(err error) {
+	channelResultSet.err = err
+}
+
+// IsEmpty returns true when the channelResultSet is empty.
+func (channelResultSet *channelResultSet) IsEmpty() bool {
+	channelResultSet.channelMutex.Lock()
+	// If our channel is empty and we have no data in it, wait for signal that the state has been updated.
+	if len(channelResultSet.channel) != 0 {
+		// Channel is not empty.
+		channelResultSet.channelMutex.Unlock()
+		return false
+	} else if channelResultSet.closed {
+		// Channel is empty and closed.
+		channelResultSet.channelMutex.Unlock()
+		return true
+	} else {
+		// Channel is empty and not closed. Need to wait for signal that state has changed, otherwise
+		// we do not know if it is empty or not.
+		// We need to grab the wait signal mutex before we release the channel mutex.
+		channelResultSet.waitSignalMutex.Lock()
+		channelResultSet.channelMutex.Unlock()
+
+		// Create a wait signal and unlock the wait signal mutex.
+		waitSignal := make(chan bool)
+		channelResultSet.waitSignal = waitSignal
+		channelResultSet.waitSignalMutex.Unlock()
+
+		// Technically if we assigned channelResultSet.waitSignal then unlocked, it could be set to nil or
+		// overwritten to another channel before we check it, so to be safe, create additional variable and
+		// check that instead.
+		<-waitSignal
+		return channelResultSet.IsEmpty()
+	}
+}
+
+// Close can be used to close the channelResultSet.
+func (channelResultSet *channelResultSet) Close() {
+	if !channelResultSet.closed {
+		channelResultSet.channelMutex.Lock()
+		channelResultSet.closed = true
+		close(channelResultSet.channel)
+		channelResultSet.channelMutex.Unlock()
+		channelResultSet.sendSignal()
+	}
+}
+
+func (channelResultSet *channelResultSet) setAggregateTo(val string) {
+	channelResultSet.aggregateTo = val
+}
+
+// GetAggregateTo returns aggregateTo for the channelResultSet.
+func (channelResultSet *channelResultSet) GetAggregateTo() string {
+	return channelResultSet.aggregateTo
+}
+
+// Channel returns channel for the channelResultSet.
+func (channelResultSet *channelResultSet) Channel() chan *Result {
+	return channelResultSet.channel
+}
+
+// One returns the next Result from the channelResultSet, blocking until one is available.
+// The value of ok is true if the value received was delivered by a successful send operation to the channel,
+// or false if it is a zero value generated because the channel is closed and empty.
+func (channelResultSet *channelResultSet) One() (*Result, bool, error) {
+	if channelResultSet.err != nil {
+		return nil, false, channelResultSet.err
+	}
+	result, ok := <-channelResultSet.channel
+	if channelResultSet.err != nil {
+		return nil, false, channelResultSet.err
+	}
+	return result, ok, nil
+}
+
+// All returns all remaining results for the channelResultSet (results grabbed through One will not be present).
+func (channelResultSet *channelResultSet) All() ([]*Result, error) {
+	var results []*Result
+	for result := range channelResultSet.channel {
+		results = append(results, result)
+	}
+	return results, channelResultSet.err
+}
+
+func (channelResultSet *channelResultSet) addResult(r *Result) {
+	channelResultSet.channelMutex.Lock()
+	if data, ok := r.Data.([]interface{}); ok {
+		for _, v := range data {
+			channelResultSet.channel <- &Result{v}
+		}
+	} else {
+		channelResultSet.channel <- &Result{r.Data}
+	}
+	channelResultSet.channelMutex.Unlock()
+	channelResultSet.sendSignal()
+}
+
+func newChannelResultSetCapacity(channelSize int) ResultSet {
+	return &channelResultSet{make(chan *Result, channelSize), "", false, nil, nil, sync.Mutex{}, sync.Mutex{}}
+}
+
+func newChannelResultSet() ResultSet {
+	return newChannelResultSetCapacity(defaultCapacity)
+}
+
+// NewResultSet creates a new ResultSet from a slice of Result objects.
+// This function enables custom transport implementations to create ResultSets from
+// results collected via alternative protocols.
+//
+// The function creates a channel-based ResultSet, pre-populates it with the provided results,
+// and closes the channel to indicate completion.
+//
+// Parameters:
+//   - results: A slice of Result objects to include in the ResultSet
+//
+// Returns:
+//   - ResultSet: A ResultSet containing all the provided results
+//
+// Example usage:
+//
+//	var results []*Result
+//	// Collect results from custom transport
+//	for _, responseBytes := range responses {
+//	    result, _ := DeserializeResult(responseBytes)
+//	    results = append(results, result)
+//	}
+//	resultSet := NewResultSet("request-123", results)
+//	allResults, _ := resultSet.All()
+func NewResultSet(results []*Result) ResultSet {
+	// Create a channel-based result set with capacity for all results
+	channelSize := len(results)
+	if channelSize == 0 {
+		channelSize = 1 // Ensure at least size 1
+	}
+	rs := newChannelResultSetCapacity(channelSize).(*channelResultSet)
+
+	// Add all results to the channel
+	for _, result := range results {
+		rs.channel <- result
+	}
+
+	// Close the channel to indicate no more results
+	rs.channelMutex.Lock()
+	rs.closed = true
+	close(rs.channel)
+	rs.channelMutex.Unlock()
+
+	return rs
+}

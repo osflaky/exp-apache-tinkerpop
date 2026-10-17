@@ -1,0 +1,494 @@
+/*
+ *  Licensed to the Apache Software Foundation (ASF) under one
+ *  or more contributor license agreements.  See the NOTICE file
+ *  distributed with this work for additional information
+ *  regarding copyright ownership.  The ASF licenses this file
+ *  to you under the Apache License, Version 2.0 (the
+ *  "License"); you may not use this file except in compliance
+ *  with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing,
+ *  software distributed under the License is distributed on an
+ *  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ *  KIND, either express or implied.  See the License for the
+ *  specific language governing permissions and limitations
+ *  under the License.
+ */
+
+/*
+ * Type detection and dispatch tests for GraphBinaryV4. Verifies that
+ * anySerializer routes each JS type to the correct serializer type code,
+ * canBeUsedFor rejects wrong types, and round-trip extras not covered
+ * by .gbin reference files.
+ */
+
+import { assert } from 'chai';
+import { Graph, Vertex, Edge, Property, VertexProperty, Path } from '../../../lib/structure/graph.js';
+import { direction, t, merge } from '../../../lib/process/traversal.js';
+import ioc, { DataType } from '../../../lib/structure/io/binary/GraphBinary.js';
+import StreamReader from '../../../lib/structure/io/binary/internals/StreamReader.js';
+
+const { anySerializer } = ioc;
+
+describe('Type Detection Tests', () => {
+  describe('Number routing (NumberSerializationStrategy)', () => {
+    it('Integer in Int32 range → INT (0x01)', () => {
+      const result = anySerializer.serialize(42);
+      assert.strictEqual(result[0], DataType.INT);
+    });
+
+    it('Integer at Int32 boundaries → INT (0x01)', () => {
+      assert.strictEqual(anySerializer.serialize(2147483647)[0], DataType.INT);
+      assert.strictEqual(anySerializer.serialize(-2147483648)[0], DataType.INT);
+    });
+
+    it('Integer beyond Int32 but in Int64 → LONG (0x02)', () => {
+      const result = anySerializer.serialize(2147483648);
+      assert.strictEqual(result[0], DataType.LONG);
+    });
+
+    it('Number.MAX_SAFE_INTEGER → LONG (0x02)', () => {
+      const result = anySerializer.serialize(Number.MAX_SAFE_INTEGER);
+      assert.strictEqual(result[0], DataType.LONG);
+    });
+
+    it('Number.MIN_SAFE_INTEGER → LONG (0x02)', () => {
+      const result = anySerializer.serialize(Number.MIN_SAFE_INTEGER);
+      assert.strictEqual(result[0], DataType.LONG);
+    });
+
+    it('Non-integer → DOUBLE (0x07)', () => {
+      assert.strictEqual(anySerializer.serialize(3.14)[0], DataType.DOUBLE);
+      assert.strictEqual(anySerializer.serialize(0.1)[0], DataType.DOUBLE);
+    });
+
+    it('NaN → DOUBLE (0x07)', () => {
+      const result = anySerializer.serialize(NaN);
+      assert.strictEqual(result[0], DataType.DOUBLE);
+    });
+
+    it('±Infinity → DOUBLE (0x07)', () => {
+      assert.strictEqual(anySerializer.serialize(Infinity)[0], DataType.DOUBLE);
+      assert.strictEqual(anySerializer.serialize(-Infinity)[0], DataType.DOUBLE);
+    });
+
+    it('-0 → DOUBLE (0x07) preserving sign', async () => {
+      const result = anySerializer.serialize(-0);
+      assert.strictEqual(result[0], DataType.DOUBLE);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(result));
+      assert.isTrue(Object.is(deserialized, -0));
+    });
+
+    it('BigInt within Int64 range → BIGINTEGER (0x23)', () => {
+      assert.strictEqual(anySerializer.serialize(123n)[0], DataType.BIGINTEGER);
+      assert.strictEqual(anySerializer.serialize(-456n)[0], DataType.BIGINTEGER);
+    });
+
+    it('BigInt at Int64 boundaries → BIGINTEGER (0x23)', () => {
+      assert.strictEqual(anySerializer.serialize(2n**63n - 1n)[0], DataType.BIGINTEGER);
+      assert.strictEqual(anySerializer.serialize(-(2n**63n))[0], DataType.BIGINTEGER);
+    });
+
+    it('BigInt beyond Int64 → BIGINTEGER (0x23)', () => {
+      assert.strictEqual(anySerializer.serialize(2n**63n)[0], DataType.BIGINTEGER);
+      assert.strictEqual(anySerializer.serialize(-(2n**63n) - 1n)[0], DataType.BIGINTEGER);
+    });
+  });
+
+  describe('Type dispatch', () => {
+    it('boolean → BOOLEAN (0x27)', () => {
+      assert.strictEqual(anySerializer.serialize(true)[0], DataType.BOOLEAN);
+      assert.strictEqual(anySerializer.serialize(false)[0], DataType.BOOLEAN);
+    });
+
+    it('string → STRING (0x03)', () => {
+      const result = anySerializer.serialize('hello');
+      assert.strictEqual(result[0], DataType.STRING);
+    });
+
+    it('Date → DATETIME (0x04)', () => {
+      const result = anySerializer.serialize(new Date());
+      assert.strictEqual(result[0], DataType.DATETIME);
+    });
+
+    it('Array → LIST (0x09)', () => {
+      const result = anySerializer.serialize([1, 2, 3]);
+      assert.strictEqual(result[0], DataType.LIST);
+    });
+
+    it('Set → SET (0x0b)', () => {
+      const result = anySerializer.serialize(new Set([1, 2, 3]));
+      assert.strictEqual(result[0], DataType.SET);
+    });
+
+    it('Map → MAP (0x0a)', () => {
+      const result = anySerializer.serialize(new Map([['a', 1]]));
+      assert.strictEqual(result[0], DataType.MAP);
+    });
+
+    it('Plain object → MAP (0x0a)', () => {
+      const result = anySerializer.serialize({});
+      assert.strictEqual(result[0], DataType.MAP);
+    });
+
+    it('Buffer → BINARY (0x25)', () => {
+      const result = anySerializer.serialize(Buffer.from('test'));
+      assert.strictEqual(result[0], DataType.BINARY);
+    });
+
+    it('null → UNSPECIFIED_NULL (0xfe)', () => {
+      const result = anySerializer.serialize(null);
+      assert.strictEqual(result[0], DataType.UNSPECIFIED_NULL);
+    });
+
+    it('undefined → UNSPECIFIED_NULL (0xfe)', () => {
+      const result = anySerializer.serialize(undefined);
+      assert.strictEqual(result[0], DataType.UNSPECIFIED_NULL);
+    });
+
+    it('Vertex → VERTEX (0x11)', () => {
+      const vertex = new Vertex(1, 'person');
+      const result = anySerializer.serialize(vertex);
+      assert.strictEqual(result[0], DataType.VERTEX);
+    });
+
+    it('Edge → EDGE (0x0d)', () => {
+      const edge = new Edge(1, new Vertex(1, 'person'), 'knows', new Vertex(2, 'person'));
+      const result = anySerializer.serialize(edge);
+      assert.strictEqual(result[0], DataType.EDGE);
+    });
+
+    it('Property → PROPERTY (0x0f)', () => {
+      const property = new Property('name', 'marko');
+      const result = anySerializer.serialize(property);
+      assert.strictEqual(result[0], DataType.PROPERTY);
+    });
+
+    it('VertexProperty → VERTEXPROPERTY (0x12)', () => {
+      const vp = new VertexProperty(1, 'name', 'marko');
+      const result = anySerializer.serialize(vp);
+      assert.strictEqual(result[0], DataType.VERTEXPROPERTY);
+    });
+
+    it('Path → PATH (0x0e)', () => {
+      const path = new Path([new Set()], [1]);
+      const result = anySerializer.serialize(path);
+      assert.strictEqual(result[0], DataType.PATH);
+    });
+
+    it('direction.out → DIRECTION (0x18)', () => {
+      const result = anySerializer.serialize(direction.out);
+      assert.strictEqual(result[0], DataType.DIRECTION);
+    });
+
+    it('t.id → T (0x20)', () => {
+      const result = anySerializer.serialize(t.id);
+      assert.strictEqual(result[0], DataType.T);
+    });
+
+    it('merge.onCreate → MERGE (0x2e)', () => {
+      const result = anySerializer.serialize(merge.onCreate);
+      assert.strictEqual(result[0], DataType.MERGE);
+    });
+  });
+
+  describe('canBeUsedFor negative cases', () => {
+    it('intSerializer rejects non-numbers', () => {
+      assert.isFalse(ioc.intSerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.intSerializer.canBeUsedFor(true));
+      assert.isFalse(ioc.intSerializer.canBeUsedFor([]));
+    });
+
+    it('stringSerializer rejects non-strings', () => {
+      assert.isFalse(ioc.stringSerializer.canBeUsedFor(42));
+      assert.isFalse(ioc.stringSerializer.canBeUsedFor(true));
+      assert.isFalse(ioc.stringSerializer.canBeUsedFor([]));
+    });
+
+    it('booleanSerializer rejects non-booleans', () => {
+      assert.isFalse(ioc.booleanSerializer.canBeUsedFor(42));
+      assert.isFalse(ioc.booleanSerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.booleanSerializer.canBeUsedFor([]));
+    });
+
+    it('vertexSerializer rejects non-vertices', () => {
+      assert.isFalse(ioc.vertexSerializer.canBeUsedFor(new Edge(1, new Vertex(1, 'p'), 'knows', new Vertex(2, 'p'))));
+      assert.isFalse(ioc.vertexSerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.vertexSerializer.canBeUsedFor(42));
+    });
+
+    it('edgeSerializer rejects non-edges', () => {
+      assert.isFalse(ioc.edgeSerializer.canBeUsedFor(new Vertex(1, 'person')));
+      assert.isFalse(ioc.edgeSerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.edgeSerializer.canBeUsedFor(42));
+    });
+
+    it('setSerializer rejects non-sets', () => {
+      assert.isFalse(ioc.setSerializer.canBeUsedFor([]));
+      assert.isFalse(ioc.setSerializer.canBeUsedFor({}));
+      assert.isFalse(ioc.setSerializer.canBeUsedFor('string'));
+    });
+
+    it('listSerializer rejects non-arrays', () => {
+      assert.isFalse(ioc.listSerializer.canBeUsedFor(new Set()));
+      assert.isFalse(ioc.listSerializer.canBeUsedFor({}));
+      assert.isFalse(ioc.listSerializer.canBeUsedFor('string'));
+    });
+
+    it('dateTimeSerializer rejects non-dates', () => {
+      assert.isFalse(ioc.dateTimeSerializer.canBeUsedFor(42));
+      assert.isFalse(ioc.dateTimeSerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.dateTimeSerializer.canBeUsedFor([]));
+    });
+
+    it('mapSerializer rejects non-maps/non-objects', () => {
+      assert.isFalse(ioc.mapSerializer.canBeUsedFor(42));
+      assert.isFalse(ioc.mapSerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.mapSerializer.canBeUsedFor([]));
+    });
+
+    it('binarySerializer rejects non-buffers', () => {
+      assert.isFalse(ioc.binarySerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.binarySerializer.canBeUsedFor(42));
+      assert.isFalse(ioc.binarySerializer.canBeUsedFor([]));
+    });
+
+    it('pathSerializer rejects non-paths', () => {
+      assert.isFalse(ioc.pathSerializer.canBeUsedFor(new Vertex(1, 'person')));
+      assert.isFalse(ioc.pathSerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.pathSerializer.canBeUsedFor(42));
+    });
+
+    it('propertySerializer rejects non-properties', () => {
+      assert.isFalse(ioc.propertySerializer.canBeUsedFor(new Vertex(1, 'person')));
+      assert.isFalse(ioc.propertySerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.propertySerializer.canBeUsedFor(42));
+    });
+
+    it('vertexPropertySerializer rejects non-vertex-properties', () => {
+      assert.isFalse(ioc.vertexPropertySerializer.canBeUsedFor(new Vertex(1, 'person')));
+      assert.isFalse(ioc.vertexPropertySerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.vertexPropertySerializer.canBeUsedFor(42));
+    });
+
+    it('enumSerializer rejects non-enums', () => {
+      assert.isFalse(ioc.enumSerializer.canBeUsedFor('string'));
+      assert.isFalse(ioc.enumSerializer.canBeUsedFor(42));
+      assert.isFalse(ioc.enumSerializer.canBeUsedFor(new Vertex(1, 'person')));
+    });
+  });
+
+  describe('Round-trip extras', () => {
+    it('nested collections', async () => {
+      const value = [1, [2, 3], new Map([['a', [4]]])];
+      const serialized = anySerializer.serialize(value);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.deepStrictEqual(deserialized, value);
+    });
+
+    it('empty containers', async () => {
+      const values = [[], new Set(), new Map(), ''];
+      for (const value of values) {
+        const serialized = anySerializer.serialize(value);
+        const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+        assert.deepStrictEqual(deserialized, value);
+      }
+    });
+
+    it('JS-specific label construction survives round-trip', async () => {
+      const vertex = new Vertex(123, 'person');
+      const serialized = anySerializer.serialize(vertex);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.strictEqual(deserialized.label, 'person');
+    });
+
+    it('Unicode strings', async () => {
+      const value = '🚀 Hello 世界';
+      const serialized = anySerializer.serialize(value);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.strictEqual(deserialized, value);
+    });
+
+    it('boundary integers', async () => {
+      const values = [0, -1, 1];
+      for (const value of values) {
+        const serialized = anySerializer.serialize(value);
+        const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+        assert.strictEqual(deserialized, value);
+      }
+    });
+
+    it('NaN round-trip', async () => {
+      const serialized = anySerializer.serialize(NaN);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.isTrue(Number.isNaN(deserialized));
+    });
+
+    it('complex nested structure', async () => {
+      const value = new Map([
+        ['numbers', [1, 2.5, BigInt(123)]],
+        ['sets', new Set(['a', 'b'])],
+        ['map', new Map([[1, 'one'], [2, 'two']])],
+        ['nested', new Map([['inner', [true, false, null]]])]
+      ]);
+      const serialized = anySerializer.serialize(value);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.deepStrictEqual(deserialized, value);
+    });
+
+    it('mixed type array', async () => {
+      const value = [1, 'string', true, null, new Date(0), Buffer.from('test')];
+      const serialized = anySerializer.serialize(value);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.strictEqual(deserialized.length, value.length);
+      assert.strictEqual(deserialized[0], 1);
+      assert.strictEqual(deserialized[1], 'string');
+      assert.strictEqual(deserialized[2], true);
+      assert.strictEqual(deserialized[3], null);
+      assert.deepStrictEqual(deserialized[4], new Date(0));
+      assert.isTrue(Buffer.isBuffer(deserialized[5]));
+      assert.isTrue(deserialized[5].equals(Buffer.from('test')));
+    });
+
+    it('graph elements with properties', async () => {
+      const vertex = new Vertex(1, ['person'], [new VertexProperty(1, ['name'], 'marko')]);
+      const serialized = anySerializer.serialize(vertex);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.strictEqual(deserialized.id, 1);
+      assert.strictEqual(deserialized.label, 'person');
+    });
+
+    it('path with multiple labels', async () => {
+      const path = new Path([new Set(['a']), new Set(['b', 'c'])], [1, 2]);
+      const serialized = anySerializer.serialize(path);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.deepStrictEqual(deserialized.labels, path.labels);
+      assert.deepStrictEqual(deserialized.objects, path.objects);
+    });
+
+    it('large numbers', async () => {
+      const values = [Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 2n**100n];
+      for (const value of values) {
+        const serialized = anySerializer.serialize(value);
+        const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+        assert.strictEqual(deserialized, value);
+      }
+    });
+
+    it('special float values', async () => {
+      const values = [Infinity, -Infinity];
+      for (const value of values) {
+        const serialized = anySerializer.serialize(value);
+        const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+        assert.strictEqual(deserialized, value);
+      }
+    });
+
+    it('enum values', async () => {
+      const values = [direction.out, direction.in, direction.both, t.id, t.key, t.label, t.value, merge.onCreate, merge.onMatch, merge.outV, merge.inV];
+      for (const value of values) {
+        const serialized = anySerializer.serialize(value);
+        const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+        assert.strictEqual(deserialized, value);
+      }
+    });
+
+    it('multi-label vertex round-trips preserving all labels', async () => {
+      const vertex = new Vertex(1, 'person', [], ['person', 'employee']);
+      const serialized = anySerializer.serialize(vertex);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.strictEqual(deserialized.id, 1);
+      assert.strictEqual(deserialized.label, 'person');
+      assert.instanceOf(deserialized.labels, Set);
+      assert.strictEqual(deserialized.labels.size, 2);
+      assert.isTrue(deserialized.labels.has('person'));
+      assert.isTrue(deserialized.labels.has('employee'));
+    });
+
+    it('zero-label vertex round-trips to empty label set', async () => {
+      const vertex = new Vertex(2, 'unused', [], []);
+      const serialized = anySerializer.serialize(vertex);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.strictEqual(deserialized.id, 2);
+      assert.instanceOf(deserialized.labels, Set);
+      assert.strictEqual(deserialized.labels.size, 0);
+    });
+
+    it('edge with multi-label endpoint vertices round-trips preserving endpoint labels', async () => {
+      const outV = new Vertex(10, 'person', [], ['person', 'employee']);
+      const inV = new Vertex(20, 'software', [], ['software', 'project']);
+      const edge = new Edge(100, outV, 'created', inV, [], ['created']);
+      const serialized = anySerializer.serialize(edge);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.strictEqual(deserialized.id, 100);
+      assert.strictEqual(deserialized.label, 'created');
+      // outV labels
+      assert.instanceOf(deserialized.outV.labels, Set);
+      assert.strictEqual(deserialized.outV.labels.size, 2);
+      assert.isTrue(deserialized.outV.labels.has('person'));
+      assert.isTrue(deserialized.outV.labels.has('employee'));
+      // inV labels
+      assert.instanceOf(deserialized.inV.labels, Set);
+      assert.strictEqual(deserialized.inV.labels.size, 2);
+      assert.isTrue(deserialized.inV.labels.has('software'));
+      assert.isTrue(deserialized.inV.labels.has('project'));
+    });
+
+    it('edge with zero-label endpoint vertices round-trips to empty endpoint label sets', async () => {
+      const outV = new Vertex(30, 'unused', [], []);
+      const inV = new Vertex(40, 'unused', [], []);
+      const edge = new Edge(200, outV, 'connects', inV, [], ['connects']);
+      const serialized = anySerializer.serialize(edge);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.strictEqual(deserialized.id, 200);
+      // outV labels
+      assert.instanceOf(deserialized.outV.labels, Set);
+      assert.strictEqual(deserialized.outV.labels.size, 0);
+      // inV labels
+      assert.instanceOf(deserialized.inV.labels, Set);
+      assert.strictEqual(deserialized.inV.labels.size, 0);
+    });
+
+    it('Graph with multi-labelled vertices round-trips preserving labels', async () => {
+      const graph = new Graph();
+      const v1 = new Vertex(1, 'person', [], ['person', 'employee']);
+      const v2 = new Vertex(2, 'software', [], ['software', 'project']);
+      graph.vertices.set(v1.id, v1);
+      graph.vertices.set(v2.id, v2);
+      const serialized = anySerializer.serialize(graph);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.instanceOf(deserialized, Graph);
+      assert.strictEqual(deserialized.vertices.size, 2);
+      const dv1 = deserialized.vertices.get(1);
+      assert.instanceOf(dv1.labels, Set);
+      assert.strictEqual(dv1.labels.size, 2);
+      assert.isTrue(dv1.labels.has('person'));
+      assert.isTrue(dv1.labels.has('employee'));
+      const dv2 = deserialized.vertices.get(2);
+      assert.instanceOf(dv2.labels, Set);
+      assert.strictEqual(dv2.labels.size, 2);
+      assert.isTrue(dv2.labels.has('software'));
+      assert.isTrue(dv2.labels.has('project'));
+    });
+
+    it('Graph with zero-labelled vertices round-trips to empty label sets', async () => {
+      const graph = new Graph();
+      const v1 = new Vertex(1, 'unused', [], []);
+      const v2 = new Vertex(2, 'unused', [], []);
+      graph.vertices.set(v1.id, v1);
+      graph.vertices.set(v2.id, v2);
+      const serialized = anySerializer.serialize(graph);
+      const deserialized = await anySerializer.deserialize(StreamReader.fromBuffer(serialized));
+      assert.instanceOf(deserialized, Graph);
+      assert.strictEqual(deserialized.vertices.size, 2);
+      const dv1 = deserialized.vertices.get(1);
+      assert.instanceOf(dv1.labels, Set);
+      assert.strictEqual(dv1.labels.size, 0);
+      const dv2 = deserialized.vertices.get(2);
+      assert.instanceOf(dv2.labels, Set);
+      assert.strictEqual(dv2.labels.size, 0);
+    });
+  });
+});

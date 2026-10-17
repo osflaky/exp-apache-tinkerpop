@@ -1,0 +1,92 @@
+#    Licensed to the Apache Software Foundation (ASF) under one
+#    or more contributor license agreements.  See the NOTICE file
+#    distributed with this work for additional information
+#    regarding copyright ownership.  The ASF licenses this file
+#    to you under the Apache License, Version 2.0 (the
+#    "License"); you may not use this file except in compliance
+#    with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#    Unless required by applicable law or agreed to in writing,
+#    software distributed under the License is distributed on an
+#    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+#    KIND, either express or implied.  See the License for the
+#    specific language governing permissions and limitations
+#    under the License.
+
+services:
+
+  gremlin-server-test-dotnet:
+    container_name: gremlin-server-test-dotnet
+    image: tinkerpop/gremlin-server-test:${GREMLIN_SERVER}
+    build:
+      context: ../
+      dockerfile: docker/gremlin-test-server/Dockerfile
+      args:
+        - GREMLIN_SERVER=${GREMLIN_SERVER}
+    ports:
+      - "45940:45940"
+      - "45941:45941"
+    volumes:
+      - ${HOME}/.groovy:/root/.groovy
+      - ${HOME}/.m2:/root/.m2
+      - ${ABS_PROJECT_HOME}/gremlin-test/target:/opt/gremlin-test
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"gremlin\":\"g.inject(1)\"}' http://localhost:45940" ]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  gremlin-socket-server-test-dotnet:
+    container_name: gremlin-socket-server-test-dotnet
+    image: tinkerpop/gremlin-socket-server:${GREMLIN_SERVER}
+    build:
+      context: ../
+      dockerfile: gremlin-tools/gremlin-socket-server/Dockerfile
+      args:
+        - SOCKET_SERVER_DIR=gremlin-tools/gremlin-socket-server/target/
+        - SOCKET_SERVER_VERSION=${GREMLIN_SERVER}
+    ports:
+      - "45943:45943"
+      - "45944:45944"
+
+  gremlin-dotnet-integration-tests:
+    container_name: gremlin-dotnet-integration-tests
+    image: mcr.microsoft.com/dotnet/sdk:8.0
+    volumes:
+      - .:/gremlin-dotnet
+      - ../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features:/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features
+      - ../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/structure/io:/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/structure/io
+      - ../docker/gremlin-test-server:/gremlin-dotnet/gremlin-test-server
+    environment:
+      - DOCKER_ENVIRONMENT=true
+      - GREMLIN_SERVER_HOST=gremlin-server-test-dotnet
+      - GREMLIN_SERVER_PORT=45940
+      - GREMLIN_SECURE_SERVER_PORT=45941
+      - GREMLIN_SOCKET_SERVER_URL=http://gremlin-socket-server-test-dotnet:45943/gremlin
+      - GREMLIN_SOCKET_SERVER_PROXY_URL=http://gremlin-socket-server-test-dotnet:45944
+      - VERTEX_LABEL=dotnet-example
+    working_dir: /gremlin-dotnet
+    command: >
+      bash -c "find . -path '*/TestResults/*.trx' -delete 2>/dev/null || true;
+      dotnet tool update -g dotnet-trx; dotnet test ./Gremlin.Net.sln -c Release --logger trx;
+      EXIT_CODE=$$?;
+      /root/.dotnet/tools/trx || true;
+      if [ $$EXIT_CODE -ne 0 ]; then echo '❌ dotnet test FAILED (exit code '$$EXIT_CODE') — build or test errors above'; fi;
+      echo 'Running parameterize Gherkin tests...';
+      PARAMETERIZE=true dotnet test ./Gremlin.Net.sln -c Release --logger trx --filter FullyQualifiedName~Gremlin.Net.IntegrationTest.Gherkin.GherkinTestRunner --no-build;
+      PARAM_EXIT=$$?;
+      if [ $$PARAM_EXIT -ne 0 ]; then echo '❌ parameterize Gherkin test FAILED (exit code '$$PARAM_EXIT')'; EXIT_CODE=$$PARAM_EXIT; fi;
+      echo 'Running examples...';
+      dotnet run --project Examples/BasicGremlin/BasicGremlin.csproj;
+      dotnet run --project Examples/Connections/Connections.csproj;
+      dotnet run --project Examples/ModernTraversals/ModernTraversals.csproj;
+      echo 'All examples completed successfully';
+      chown -R `stat -c \"%u:%g\" .` .; exit $$EXIT_CODE"
+    depends_on:
+      gremlin-server-test-dotnet:
+        condition: service_healthy
+      gremlin-socket-server-test-dotnet:
+        condition: service_started

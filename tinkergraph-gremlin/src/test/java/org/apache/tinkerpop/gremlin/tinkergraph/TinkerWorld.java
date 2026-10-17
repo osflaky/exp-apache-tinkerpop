@@ -1,0 +1,412 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.tinkerpop.gremlin.tinkergraph;
+
+import io.cucumber.java.Scenario;
+import org.apache.commons.configuration2.BaseConfiguration;
+import org.apache.commons.configuration2.Configuration;
+import org.apache.commons.configuration2.MapConfiguration;
+import org.apache.tinkerpop.gremlin.LoadGraphWith;
+import org.apache.tinkerpop.gremlin.TestHelper;
+import org.apache.tinkerpop.gremlin.features.World;
+import org.apache.tinkerpop.gremlin.process.computer.GraphComputer;
+import org.apache.tinkerpop.gremlin.process.computer.traversal.strategy.decoration.VertexProgramStrategy;
+import org.apache.tinkerpop.gremlin.process.traversal.dsl.graph.GraphTraversalSource;
+import org.apache.tinkerpop.gremlin.structure.Element;
+import org.apache.tinkerpop.gremlin.tinkergraph.process.computer.TinkerGraphComputer;
+import org.apache.tinkerpop.gremlin.tinkergraph.services.TinkerDegreeCentralityFactory;
+import org.apache.tinkerpop.gremlin.tinkergraph.services.TinkerTextSearchFactory;
+import org.apache.tinkerpop.gremlin.tinkergraph.structure.AbstractTinkerGraph;
+import org.apache.tinkerpop.gremlin.tinkergraph.structure.TinkerFactory;
+import org.apache.tinkerpop.gremlin.tinkergraph.structure.TinkerGraph;
+import org.apache.tinkerpop.gremlin.tinkergraph.structure.TinkerMemoryGraph;
+import org.apache.tinkerpop.gremlin.tinkergraph.structure.TinkerStorageGraph;
+import org.apache.tinkerpop.gremlin.tinkergraph.structure.TinkerShuffleGraph;
+import org.junit.AssumptionViolatedException;
+
+import java.io.File;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Random;
+import java.util.stream.Collectors;
+
+/**
+ * The abstract {@link World} implementation for AbstractTinkerGraph.
+ */
+public abstract class TinkerWorld implements World {
+    @Override
+    public String changePathToDataFile(final String pathToFileFromGremlin) {
+        return ".." + File.separator + pathToFileFromGremlin;
+    }
+
+    /**
+     * Get an instance of the underlying AbstractTinkerGraph with the provided configuration.
+     */
+    public abstract AbstractTinkerGraph open(final Configuration configuration);
+
+    protected static Configuration getNumberIdManagerConfiguration() {
+        final Configuration conf = new BaseConfiguration();
+        conf.setProperty(TinkerGraph.GREMLIN_TINKERGRAPH_VERTEX_ID_MANAGER, AbstractTinkerGraph.DefaultIdManager.INTEGER.name());
+        conf.setProperty(TinkerGraph.GREMLIN_TINKERGRAPH_EDGE_ID_MANAGER, AbstractTinkerGraph.DefaultIdManager.INTEGER.name());
+        conf.setProperty(TinkerGraph.GREMLIN_TINKERGRAPH_VERTEX_PROPERTY_ID_MANAGER, AbstractTinkerGraph.DefaultIdManager.LONG.name());
+        return conf;
+    }
+
+    /**
+     * Like {@link #getNumberIdManagerConfiguration()} but configured with {@code ZERO_OR_MORE} vertex label
+     * cardinality for use by graphs backing {@code @MultiLabel} tagged scenarios.
+     */
+    protected static Configuration getMultiLabelConfiguration() {
+        final Configuration conf = getNumberIdManagerConfiguration();
+        conf.setProperty(AbstractTinkerGraph.GREMLIN_TINKERGRAPH_VERTEX_LABEL_CARDINALITY, "ZERO_OR_MORE");
+        return conf;
+    }
+
+    protected static AbstractTinkerGraph registerTestServices(final AbstractTinkerGraph graph) {
+        graph.getServiceRegistry().registerService(new TinkerTextSearchFactory(graph));
+        graph.getServiceRegistry().registerService(new TinkerDegreeCentralityFactory(graph));
+        return graph;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * The concrete {@link World} implementation for TinkerGraph that provides the {@link GraphTraversalSource}
+     * instances required by the Gherkin test suite.
+     */
+    public static class TinkerGraphWorld extends TinkerWorld {
+        private static final AbstractTinkerGraph modern = registerTestServices(TinkerFactory.createModern());
+        private static final AbstractTinkerGraph classic = registerTestServices(TinkerFactory.createClassic());
+        private static final AbstractTinkerGraph crew = registerTestServices(TinkerFactory.createTheCrew());
+        private static final AbstractTinkerGraph sink = registerTestServices(TinkerFactory.createKitchenSink());
+        private static final AbstractTinkerGraph grateful = registerTestServices(TinkerFactory.createGratefulDead());
+        private static final AbstractTinkerGraph zoo = registerTestServices(TinkerFactory.createTheZoo());
+
+        @Override
+        public GraphTraversalSource getGraphTraversalSource(final LoadGraphWith.GraphData graphData) {
+            if (null == graphData)
+                return registerTestServices(TinkerMemoryGraph.open(getNumberIdManagerConfiguration())).traversal();
+            else if (graphData == LoadGraphWith.GraphData.CLASSIC)
+                return classic.traversal();
+            else if (graphData == LoadGraphWith.GraphData.CREW)
+                return crew.traversal();
+            else if (graphData == LoadGraphWith.GraphData.MODERN)
+                return modern.traversal();
+            else if (graphData == LoadGraphWith.GraphData.SINK)
+                return sink.traversal();
+            else if (graphData == LoadGraphWith.GraphData.GRATEFUL)
+                return grateful.traversal();
+            else if (graphData == LoadGraphWith.GraphData.ZOO)
+                return zoo.traversal();
+            else
+                throw new UnsupportedOperationException("GraphData not supported: " + graphData.name());
+        }
+
+        @Override
+        public GraphTraversalSource getMultiLabelGraphTraversalSource() {
+            return registerTestServices(TinkerMemoryGraph.open(getMultiLabelConfiguration())).traversal();
+        }
+
+        @Override
+        public AbstractTinkerGraph open(final Configuration configuration) {
+            return TinkerMemoryGraph.open(configuration);
+        }
+    }
+
+    public static class TinkerGraphParameterizedWorld extends TinkerGraphWorld {
+
+        @Override
+        public void beforeEachScenario(final Scenario scenario) {
+            super.beforeEachScenario(scenario);
+
+            switch (scenario.getName()) {
+                // Parameterized execution can't pass these tests because variables are dynamically determined
+                // and therefore cannot trigger validations at traversal construction...they can only trigger
+                // them at traversal execution. we test these validations both ways under a variety of
+                // configurations so there isn't much need to have more coverage there
+                case "g_mergeEXout_vadasX_optionXonCreate_created_YX_optionXonMatch_created_NX_exists_updated_override_prohibited":
+                case "g_mergeEXlabel_knows_out_vadasX_optionXonCreate_created_YX_optionXonMatch_created_NX_exists_updated_override_prohibited":
+                    throw new AssumptionViolatedException("Not supported for parameterized tests with GValue");
+                default:
+                    // Do nothing
+            }
+        }
+
+        @Override
+        public boolean useParametersLiterally() {
+            return false;
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * The {@link World} implementation for TinkerStorageGraph that provides the {@link GraphTraversalSource}
+     * instances required by the Gherkin test suite.
+     */
+    public static class TinkerStorageGraphWorld extends TinkerWorld {
+        private static final AbstractTinkerGraph modern;
+        private static final AbstractTinkerGraph classic;
+        private static final AbstractTinkerGraph crew;
+        private static final AbstractTinkerGraph sink;
+        private static final AbstractTinkerGraph grateful;
+        private static final AbstractTinkerGraph zoo;
+
+        static {
+            modern = TinkerStorageGraph.open(getNumberIdManagerConfiguration());
+            TinkerFactory.generateModern(modern);
+            modern.tx().commit();
+            registerTestServices(modern);
+
+            classic = TinkerStorageGraph.open(getNumberIdManagerConfiguration());
+            TinkerFactory.generateClassic(classic);
+            classic.tx().commit();
+            registerTestServices(classic);
+
+            crew = TinkerStorageGraph.open(getNumberIdManagerConfiguration());
+            TinkerFactory.generateTheCrew(crew);
+            crew.tx().commit();
+            registerTestServices(crew);
+
+            sink = TinkerStorageGraph.open(getNumberIdManagerConfiguration());
+            TinkerFactory.generateKitchenSink(sink);
+            sink.tx().commit();
+            registerTestServices(sink);
+
+            grateful = TinkerStorageGraph.open(getNumberIdManagerConfiguration());
+            TinkerFactory.generateGratefulDead(grateful);
+            grateful.tx().commit();
+            registerTestServices(grateful);
+
+            zoo = TinkerStorageGraph.open(getMultiLabelConfiguration());
+            TinkerFactory.generateTheZoo(zoo);
+            zoo.tx().commit();
+            registerTestServices(zoo);
+        }
+
+        @Override
+        public GraphTraversalSource getGraphTraversalSource(final LoadGraphWith.GraphData graphData) {
+            if (null == graphData)
+                return registerTestServices(TinkerStorageGraph.open(getNumberIdManagerConfiguration())).traversal();
+            else if (graphData == LoadGraphWith.GraphData.CLASSIC)
+                return classic.traversal();
+            else if (graphData == LoadGraphWith.GraphData.CREW)
+                return crew.traversal();
+            else if (graphData == LoadGraphWith.GraphData.MODERN)
+                return modern.traversal();
+            else if (graphData == LoadGraphWith.GraphData.SINK)
+                return sink.traversal();
+            else if (graphData == LoadGraphWith.GraphData.GRATEFUL)
+                return grateful.traversal();
+            else if (graphData == LoadGraphWith.GraphData.ZOO)
+                return zoo.traversal();
+            else
+                throw new UnsupportedOperationException("GraphData not supported: " + graphData.name());
+        }
+
+        @Override
+        public GraphTraversalSource getMultiLabelGraphTraversalSource() {
+            return registerTestServices(TinkerStorageGraph.open(getMultiLabelConfiguration())).traversal();
+        }
+
+        @Override
+        public AbstractTinkerGraph open(final Configuration configuration) {
+            return TinkerStorageGraph.open(configuration);
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * The {@link World} implementation for TinkerShuffleGraph that provides the {@link GraphTraversalSource}
+     * instances required by the Gherkin test suite.
+     */
+    public static class TinkerShuffleGraphWorld extends TinkerWorld {
+        private static final TinkerShuffleGraph modern;
+        private static final TinkerShuffleGraph classic;
+        private static final TinkerShuffleGraph crew;
+        private static final TinkerShuffleGraph sink;
+        private static final TinkerShuffleGraph grateful;
+        private static final TinkerShuffleGraph zoo;
+
+        static {
+            modern = TinkerShuffleGraph.open();
+            TinkerFactory.generateModern(modern);
+            registerTestServices(modern);
+            classic = TinkerShuffleGraph.open();
+            TinkerFactory.generateClassic(classic);
+            registerTestServices(classic);
+            crew = TinkerShuffleGraph.open();
+            TinkerFactory.generateTheCrew(crew);
+            registerTestServices(crew);
+            sink = TinkerShuffleGraph.open();
+            TinkerFactory.generateKitchenSink(sink);
+            registerTestServices(sink);
+            grateful = TinkerShuffleGraph.open();
+            TinkerFactory.generateGratefulDead(grateful);
+            registerTestServices(grateful);
+            zoo = TinkerShuffleGraph.open(getMultiLabelConfiguration());
+            TinkerFactory.generateTheZoo(zoo);
+            registerTestServices(zoo);
+        }
+
+        @Override
+        public GraphTraversalSource getGraphTraversalSource(final LoadGraphWith.GraphData graphData) {
+            if (null == graphData)
+                return registerTestServices(TinkerMemoryGraph.open(getNumberIdManagerConfiguration())).traversal();
+            else if (graphData == LoadGraphWith.GraphData.CLASSIC)
+                return classic.traversal();
+            else if (graphData == LoadGraphWith.GraphData.CREW)
+                return crew.traversal();
+            else if (graphData == LoadGraphWith.GraphData.MODERN)
+                return modern.traversal();
+            else if (graphData == LoadGraphWith.GraphData.SINK)
+                return sink.traversal();
+            else if (graphData == LoadGraphWith.GraphData.GRATEFUL)
+                return grateful.traversal();
+            else if (graphData == LoadGraphWith.GraphData.ZOO)
+                return zoo.traversal();
+            else
+                throw new UnsupportedOperationException("GraphData not supported: " + graphData.name());
+        }
+
+        @Override
+        public GraphTraversalSource getMultiLabelGraphTraversalSource() {
+            return registerTestServices(TinkerMemoryGraph.open(getMultiLabelConfiguration())).traversal();
+        }
+
+        @Override
+        public AbstractTinkerGraph open(final Configuration configuration) {
+            return TinkerShuffleGraph.open(configuration);
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * Enables the storing of {@code null} property values when testing. This is a terminal decorator and shouldn't be
+     * used as an input into another decorator.
+     */
+    public static class NullWorld implements World {
+        private TinkerWorld world;
+
+        public NullWorld(final TinkerWorld world) { this.world = world; }
+
+        @Override
+        public GraphTraversalSource getGraphTraversalSource(final LoadGraphWith.GraphData graphData) {
+            if (graphData != null)
+                throw new UnsupportedOperationException("GraphData not supported: " + graphData.name());
+
+            final Configuration conf = getNumberIdManagerConfiguration();
+            conf.setProperty(TinkerGraph.GREMLIN_TINKERGRAPH_ALLOW_NULL_PROPERTY_VALUES, true);
+            return world.open(conf).traversal();
+        }
+
+        @Override
+        public void beforeEachScenario(final Scenario scenario) {
+            this.world.beforeEachScenario(scenario);
+        }
+
+        @Override
+        public void afterEachScenario() {
+            this.world.afterEachScenario();
+        }
+
+        @Override
+        public String changePathToDataFile(final String pathToFileFromGremlin) {
+            return this.world.changePathToDataFile(pathToFileFromGremlin);
+        }
+
+        @Override
+        public String convertIdToScript(final Object id, final Class<? extends Element> type) {
+            return this.world.convertIdToScript(id, type);
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * Enables testing of GraphComputer functionality.
+     */
+    public static class ComputerWorld implements World {
+        private static final Random RANDOM = TestHelper.RANDOM;
+
+        private final World world;
+
+        public ComputerWorld(final World world) { this.world = world; }
+
+        @Override
+        public GraphTraversalSource getGraphTraversalSource(final LoadGraphWith.GraphData graphData) {
+            if (null == graphData)
+                throw new AssumptionViolatedException("GraphComputer does not support mutation");
+
+            return this.world.getGraphTraversalSource(graphData).withStrategies(VertexProgramStrategy.create(new MapConfiguration(new HashMap<String, Object>() {{
+                put(VertexProgramStrategy.WORKERS, Runtime.getRuntime().availableProcessors());
+                put(VertexProgramStrategy.GRAPH_COMPUTER, RANDOM.nextBoolean() ?
+                        GraphComputer.class.getCanonicalName() :
+                        TinkerGraphComputer.class.getCanonicalName());
+            }})));
+        }
+
+        @Override
+        public void beforeEachScenario(final Scenario scenario) {
+            this.world.beforeEachScenario(scenario);
+
+            switch (scenario.getName()) {
+                // TINKERPOP-3208
+                case "g_V_repeatXunionXoutXknowsX_order_byXnameX_inXcreatedX_order_byXnameXXX_timesX1X":
+                case "g_V_repeatXboth_repeatXorder_byXnameXX_timesX1XX_timesX1X":
+                case "g_V_order_byXname_descX_repeatXboth_simplePath_order_byXname_descXX_timesX2X_path":
+                case "g_VX3X_repeatXoutE_order_byXweightX_tailX2X_inVX_timesX2X_valuesXnameX":
+                case "g_VX3X_repeatXoutE_order_byXweight_descX_limitX2X_inVX_timesX2X_valuesXnameX":
+                case "g_VX3X_repeatXout_order_byXperformances_descX_limitX5X_tailX1XX_timesX2X_valuesXnameX":
+                case "g_VX3X_repeatXout_order_byXperformancesX_tailX3X_limitX1XX_timesX2X_valuesXnameX":
+                case "g_VX250X_repeatXout_localXorder_byXperformancesX_tailX1XXX_timesX2X_valuesXnameX":
+                case "g_VX3X_repeatXout_order_byXperformancesX_tailX2XX_timesX2X_valuesXnameX":
+                case "g_V_emit_repeatXout_order_byXnameXX_timesX2X_valuesXnameX":
+                case "g_V_emitXhasLabelXpersonXX_repeatXout_order_byXnameXX_timesX2X_valuesXnameX":
+                case "g_V_untilXloops_isX2XX_repeatXout_order_byXnameXX_valuesXnameX":
+                    throw new AssumptionViolatedException("GraphComputer doesn't order within repeat");
+                // TINKERPOP-3209
+                case "g_V_localXgroupCountXaX_selectXaX_countXlocalXX":
+                case "g_V_localXgroupXaX_byXnameX_by_selectXaX_countXlocalXX":
+                case "g_V_out_order_byXnameX_localXtreeXaX_selectXaX_countXlocalXX":
+                    throw new AssumptionViolatedException("Selecting side effects inside local() produces inconsistent results in OLAP (See TINKERPOP-3209)");
+                default:
+                    // Do nothing
+            }
+        }
+
+        @Override
+        public void afterEachScenario() {
+            this.world.afterEachScenario();
+        }
+
+        @Override
+        public String changePathToDataFile(final String pathToFileFromGremlin) {
+            return this.world.changePathToDataFile(pathToFileFromGremlin);
+        }
+
+        @Override
+        public String convertIdToScript(final Object id, final Class<? extends Element> type) {
+            return this.world.convertIdToScript(id, type);
+        }
+    }
+}

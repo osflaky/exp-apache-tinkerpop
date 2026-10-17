@@ -1,0 +1,58 @@
+{
+  "homepage": "/gremlint",
+  "name": "gremlint.com",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "gremlint": "^3.8.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "sharp-router": "^4.1.5",
+    "styled-components": "^6.1.14",
+    "web-vitals": "^6.0.1"
+  },
+  "scripts": {
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d dist",
+    "start": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest"
+  },
+  "author": "Øyvind Sæbø",
+  "license": "Apache-2.0",
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^26.1.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "gh-pages": "^6.3.0",
+    "jsdom": "^30.0.1",
+    "prettier": "^3.4.2",
+    "typescript": "~7.0.2",
+    "vite": "^8.0.10",
+    "vitest": "^4.1.4"
+  },
+  "overrides": {
+    "react": "$react",
+    "react-dom": "$react-dom"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

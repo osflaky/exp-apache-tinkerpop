@@ -1,0 +1,6 @@
+org.apache.tinkerpop.gremlin.driver.remote.GraphBinaryLangRemoteFeatureTest$RemoteGuiceFactory
+org.apache.tinkerpop.gremlin.driver.remote.GraphBinaryLangRemoteParameterizedFeatureTest$RemoteGuiceFactory
+org.apache.tinkerpop.gremlin.driver.remote.GraphBinaryLangBulkedRemoteFeatureTest$RemoteGuiceFactory
+org.apache.tinkerpop.gremlin.driver.remote.GraphBinaryGroovyRemoteFeatureTest$RemoteGuiceFactory
+org.apache.tinkerpop.gremlin.driver.remote.GraphBinaryGroovyRemoteParameterizedFeatureTest$RemoteGuiceFactory
+org.apache.tinkerpop.gremlin.driver.remote.GraphBinaryRemoteComputerFeatureTest$RemoteGuiceFactory

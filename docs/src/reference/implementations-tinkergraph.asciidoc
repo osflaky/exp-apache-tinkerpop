@@ -1,0 +1,465 @@
+////
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+////
+[[tinkergraph-gremlin]]
+== TinkerGraph-Gremlin
+
+[source,xml]
+----
+<dependency>
+   <groupId>org.apache.tinkerpop</groupId>
+   <artifactId>tinkergraph-gremlin</artifactId>
+   <version>x.y.z</version>
+</dependency>
+
+<!--
+  For a minimal version without sample datasets where TinkerFactory will not load the
+  Air Routes or Grateful Dead dataset.
+-->
+<dependency>
+   <groupId>org.apache.tinkerpop</groupId>
+   <artifactId>tinkergraph-gremlin</artifactId>
+   <version>x.y.z</version>
+   <classifier>min</classifier>
+</dependency>
+----
+
+image:tinkerpop-character.png[width=100,float=left] TinkerGraph is a single machine, in-memory (with optional
+persistence), graph engine that provides both OLTP and OLAP functionality. It is non-transactional by default but does
+have a lightweight transactional form that can be instantiated offering simple `ThreadLocal` transactions supporting
+`read committed` transaction isolation. As of 4.0.0, `TinkerGraph` is an interface with two implementations:
+`TinkerMemoryGraph`, the in-memory, non-transactional implementation that `TinkerGraph.open()` constructs, and
+`TinkerStorageGraph`, the transactional implementation formerly named `TinkerTransactionGraph`. TinkerGraph is
+deployed with TinkerPop and serves as the reference
+implementation for other providers to study in order to understand the semantics of the various methods of the
+TinkerPop API. Its status as a reference implementation does not however imply that it is not suitable for production.
+TinkerGraph has many practical use cases in production applications and their development. Some examples of TinkerGraph
+use cases include:
+
+* Ad-hoc analysis of large immutable graphs that fit in memory.
+* Extract subgraphs, from larger graphs that don't fit in memory, into TinkerGraph for further analysis or other
+purposes.
+* Use TinkerGraph as a sandbox to develop and debug complex traversals by simulating data from a larger graph inside
+a TinkerGraph.
+* Configure it to match the semantics of a production graph database for unit testing purpose to simplify development
+setup and automated builds.
+
+Constructing a simple graph using TinkerGraph in Java is presented below:
+
+[source,java]
+----
+Graph graph = TinkerGraph.open();
+GraphTraversalSource g = traversal().with(graph);
+Vertex marko = g.addV("person").property("name","marko").property("age",29).next();
+Vertex lop = g.addV("software").property("name","lop").property("lang","java").next();
+g.addE("created").from(marko).to(lop).property("weight",0.6d).iterate();
+----
+
+The above Gremlin creates two vertices named "marko" and "lop" and connects them via a created-edge with a weight=0.6
+property. The addition of these two vertices and the edge between them could also be done in a single Gremlin statement
+as follows:
+
+[source,java]
+----
+g.addV("person").property("name","marko").property("age",29).as("m").
+  addV("software").property("name","lop").property("lang","java").as("l").
+  addE("created").from("m").to("l").property("weight",0.6d).iterate();
+----
+
+IMPORTANT: Pay attention to the fact that traversals end with `next()` or `iterate()`. These methods advance the
+objects in the traversal stream and without those methods, the traversal does nothing. Review the
+link:https://tinkerpop.apache.org/docs/x.y.z/tutorials/the-gremlin-console/#result-iteration[Result Iteration Section]
+of The Gremlin Console tutorial for more information.
+
+Next, the graph can be queried as such.
+
+[source,java]
+g.V().has("name","marko").out("created").values("name")
+
+The `g.V().has("name","marko")` part of the query can be executed in two ways.
+
+ * A linear scan of all vertices filtering out those vertices that don't have the name "marko"
+ * A `O(log(|V|))` index lookup for all vertices with the name "marko"
+
+Given the initial graph construction in the first code block, no index was defined and thus, a linear scan is executed.
+However, if the graph was constructed as such, then an index lookup would be used.
+
+[source,java]
+Graph g = TinkerGraph.open();
+g.createIndex("name",Vertex.class)
+
+The execution times for a vertex lookup by property is provided below for both no-index and indexed version of
+TinkerGraph over the Grateful Dead graph.
+
+[gremlin-groovy]
+----
+graph = TinkerGraph.open()
+g = traversal().with(graph)
+g.io('data/grateful-dead.xml').read().iterate()
+clock(1000) {g.V().has('name','Garcia').iterate()} <1>
+graph = TinkerGraph.open()
+g = traversal().with(graph)
+graph.createIndex('name',Vertex.class)
+g.io('data/grateful-dead.xml').read().iterate()
+clock(1000){g.V().has('name','Garcia').iterate()} <2>
+----
+
+<1> Determine the average runtime of 1000 vertex lookups when no `name`-index is defined.
+<2> Determine the average runtime of 1000 vertex lookups when a `name`-index is defined.
+
+IMPORTANT: Each graph system will have different mechanism by which indices and schemas are defined. TinkerPop
+does not require any conformance in this area. In TinkerGraph, the only definitions are around indices. With other
+graph systems, property value types, indices, edge labels, etc. may be required to be defined _a priori_ to adding
+data to the graph.
+
+NOTE: TinkerGraph is distributed with Gremlin Server and is therefore automatically available to it for configuration.
+
+=== Data Types
+
+TinkerGraph can store any Java `Object` for a property value. It is therefore important to take note of the types of
+the values that are being used and it is often best to be explicit in terms of exactly what type is being used,
+especially in the case of numbers.
+
+[gremlin-groovy]
+----
+graph = TinkerGraph.open()
+g = traversal().with(graph)
+g.addV().property('vp2',0.65780294)
+g.addV().property('vp2',0.65780294f)
+g.addV().property('vp2',0.65780294d)
+g.V().has('vp2',0.65780294)     <1>
+g.V().has('vp2',0.65780294f)    <2>
+g.V().has('vp2',0.65780294d)    <3>
+----
+
+<1> In Gremlin Console, `0.65780294` actually evaluates to a `BigDecimal`, which won't match the specifically typed
+`float` property value.
+<2> The explicit `float` will only match the `float` property value.
+<3> The explicit `double` will only match the `double` and `BigDecimal` values.
+
+Unlike other graphs, the above demonstration shows that TinkerGraph does not do any form of type coercion (except for
+type coercion related to element identifiers as described in the <<next section,tinkergraph-configuration>>).
+
+[[tinkergraph-configuration]]
+=== Configuration
+
+TinkerGraph has several settings that can be provided on creation via `Configuration` object:
+
+[width="100%",cols="2,10",options="header"]
+|=========================================================
+|Property |Description
+|gremlin.graph |`org.apache.tinkerpop.gremlin.tinkergraph.structure.TinkerGraph`. This name refers to the
+`TinkerGraph` interface and resolves to the in-memory implementation. The name of either implementation,
+`TinkerMemoryGraph` or `TinkerStorageGraph`, may be specified instead.
+|gremlin.tinkergraph.vertexIdManager |The `IdManager` implementation to use for vertices.
+|gremlin.tinkergraph.edgeIdManager |The `IdManager` implementation to use for edges.
+|gremlin.tinkergraph.vertexPropertyIdManager |The `IdManager` implementation to use for vertex properties.
+|gremlin.tinkergraph.defaultVertexPropertyCardinality |The default `VertexProperty.Cardinality` to use when `Vertex.property(k,v)` is called.
+|gremlin.tinkergraph.allowNullPropertyValues |A boolean value that determines whether or not `null` property values are allowed and defaults to `false`.
+|gremlin.tinkergraph.vertexLabelCardinality |The `LabelCardinality` for vertices. Options are `ONE` (default, single immutable label, backward-compatible with 3.x), `ONE_OR_MORE` (at least one label, mutable), or `ZERO_OR_MORE` (zero or more labels). See <<tinkergraph-multi-label>>.
+|gremlin.tinkergraph.graphLocation |The path and file name for where TinkerGraph should persist the graph data. If a
+value is specified here, the `gremlin.tinkergraph.graphFormat` should also be specified.  If this value is not
+included (default), then the graph will stay in-memory and not be loaded/persisted to disk.
+|gremlin.tinkergraph.graphFormat |The format to use to serialize the graph which may be one of the following:
+`graphml`, `graphson`, `gryo`, or a fully qualified class name that implements Io.Builder interface (which allows for
+external third party graph reader/writer formats to be used for persistence).
+If a value is specified here, then the `gremlin.tinkergraph.graphLocation` should
+also be specified.  If this value is not included (default), then the graph will stay in-memory and not be
+loaded/persisted to disk.
+|=========================================================
+
+NOTE: To use <<tinkergraph-gremlin-tx, transactions>>, configure `gremlin.graph` as
+`org.apache.tinkerpop.gremlin.tinkergraph.structure.TinkerStorageGraph`.
+
+The `IdManager` settings above refer to how TinkerGraph will control identifiers for vertices, edges and vertex
+properties.  There are several options for each of these settings: `ANY`, `LONG`, `INTEGER`, `UUID`, `STRING` or the
+fully qualified class name of an `IdManager` implementation on the classpath.  When not specified, the default values
+for all settings is `ANY`, meaning that the graph will work with any object on the JVM as the identifier and will
+generate new identifiers from `Long` when the identifier is not user supplied.  TinkerGraph will also expect the
+user to understand the types used for identifiers when querying, meaning that `g.V(1)` and `g.V(1L)` could return
+two different vertices.  `LONG`, `INTEGER` and `UUID` settings will try to coerce identifier values to the expected
+type as well as generate new identifiers with that specified type.
+
+TIP: Setting the `IdManager` to `ANY` also allows `String` type ID values to be used.                                              
+
+If the TinkerGraph is configured for persistence with `gremlin.tinkergraph.graphLocation` and
+`gremlin.tinkergraph.graphFormat`, then the graph will be written to the specified location with the specified
+format when `Graph.close()` is called.  In addition, if these settings are present, TinkerGraph will attempt to
+load the graph from the specified location.
+
+IMPORTANT: If choosing `graphson` as the `gremlin.tinkergraph.graphFormat` with untyped GraphSON, be sure to also
+establish the various `IdManager` settings to ensure that identifiers are properly coerced to the appropriate types,
+as untyped GraphSON can lose the identifier's type during serialization (i.e. it will assume `Integer` when the
+default for TinkerGraph is `Long`, which could lead to load errors that result in a message like, "Vertex with id
+already exists"). Typed GraphSON preserves the identifier's type across the serialization round-trip (for example, a
+`Long` identifier is written as `{"@type":"g:Int64","@value":...}`), so the `IdManager` coercion above is not
+required in that case.
+
+These settings can be supplied programmatically by building a `Configuration` and passing it to `TinkerGraph.open()`.
+For example, to persist to disk as GraphSON while keeping `Long` identifiers:
+
+[source,java]
+----
+BaseConfiguration conf = new BaseConfiguration();
+conf.setProperty("gremlin.tinkergraph.graphLocation", "/tmp/tinkergraph.json");
+conf.setProperty("gremlin.tinkergraph.graphFormat", "graphson");
+conf.setProperty("gremlin.tinkergraph.vertexIdManager", "LONG");
+Graph graph = TinkerGraph.open(conf);
+// ... work with the graph ...
+graph.close(); // persists the graph to the configured graphLocation
+----
+
+It is important to consider the data being imported to TinkerGraph with respect to `defaultVertexPropertyCardinality`
+setting.  For example, if a `.gryo` file is known to contain multi-property data, be sure to set the default
+cardinality to `list` or else the data will import as `single`.  Consider the following:
+
+[gremlin-groovy]
+----
+graph = TinkerGraph.open()
+g = traversal().with(graph)
+g.io("data/tinkerpop-crew.kryo").read().iterate()
+g.V().properties()
+conf = new BaseConfiguration()
+conf.setProperty("gremlin.tinkergraph.defaultVertexPropertyCardinality","list")
+graph = TinkerGraph.open(conf)
+g = traversal().with(graph)
+g.io("data/tinkerpop-crew.kryo").read().iterate()
+g.V().properties()
+----
+
+[[tinkergraph-multi-label]]
+=== Multi-Label Support
+
+TinkerGraph supports multiple labels per vertex when `gremlin.tinkergraph.vertexLabelCardinality` is set to
+`ONE_OR_MORE` or `ZERO_OR_MORE`. This enables use of the `addLabel()`, `dropLabel()`, `dropLabels()`, and `labels()`
+traversal steps.
+
+[gremlin-groovy]
+----
+conf = new BaseConfiguration()
+conf.setProperty("gremlin.tinkergraph.vertexLabelCardinality", "ZERO_OR_MORE")
+graph = TinkerGraph.open(conf)
+g = traversal().with(graph)
+g.addV("person","employee").property("name","marko").iterate()
+g.V().has("name","marko").labels() <1>
+g.V().has("name","marko").addLabel("manager").labels() <2>
+g.V().has("name","marko").dropLabel("employee").labels() <3>
+----
+
+<1> The vertex was created with two labels.
+<2> A third label is added.
+<3> One label is removed.
+
+The `hasLabel()` step works with multi-label vertices using OR semantics: `hasLabel("a","b")` matches any vertex that
+has label "a" OR label "b". To match vertices having both labels, chain multiple `hasLabel()` calls:
+`hasLabel("a").hasLabel("b")`.
+
+[[tinkergraph-gremlin-tx]]
+=== Transactions
+
+`TinkerGraph` includes optional transaction support and thread-safety through the `TinkerStorageGraph` class.
+The default configuration of TinkerGraph remains non-transactional.
+
+NOTE: This feature was first made available in TinkerPop 3.7.0 as `TinkerTransactionGraph`. The class was renamed to
+`TinkerStorageGraph` in 4.0.0.
+
+==== Transaction Semantics
+
+`TinkerStorageGraph` only has support for `ThreadLocal` transactions, so embedded graph transactions may not be fully
+supported. You can think of the transaction as belonging to a thread, any traversals executed within the same thread
+will share the same transaction even if you attempt to start a new transaction.
+
+`TinkerStorageGraph` provides the `read committed` transaction isolation level. This means that it will always try to
+guard against dirty reads but will not prevent non-repeatable reads or phantom reads. While you may notice stricter 
+isolation semantics in some cases, you should not depend on this behavior as it may change in the future.
+
+`TinkerStorageGraph` employs optimistic locking as its locking strategy. This reduces complexity in the design as
+there are fewer timeouts that the user needs to manage. However, a consequence of this approach is that a transaction
+will throw a `TransactionException` if two different transactions attempt to lock the same element (see "Best Practices"
+below).
+
+[[testing-remote-providers]]
+==== Testing Remote Providers
+
+These transaction semantics described above may not fit use cases for some production scenarios that require strict
+ACID-like transactions. Therefore, it is recommended that `TinkerStorageGraph` be used as a `Graph` for test
+environments where you still require access to a `Graph` that supports transactions. `TinkerStorageGraph` does fully
+support TinkerPop's `Transaction` interface which still makes it a useful `Graph` for exploring the
+<<transactions,Transaction API>>.
+
+A common scenario where this sort of testing is helpful is with <<connecting-rgp, Remote Graph Providers>>, where
+developing unit tests might be hard against a graph service. Instead, configure `TinkerStorageGraph`, either in an
+embedded style if using Java or with Gremlin Server for other cases.
+
+[source,java]
+----
+// consider this class that returns the results of some Gremlin. by constructing the
+// GraphService in a way that takes a GraphTraversalSource it becomes possible to
+// execute getPersons() under any graph system.
+public class GraphService {
+    private final GraphTraversalSource g;
+
+    public GraphService(GraphTraversalSource g) {
+        this.g = g;
+    }
+
+    public List<Vertex> getPersons() {
+        return g.V().hasLabel("person").toList();
+    }
+}
+
+// when writing tests for the GraphService it becomes possible to configure the test
+// to run in a variety of scenarios. here we decide that TinkerStorageGraph is a
+// suitable test graph replacement for our actual production graph.
+public class GraphServiceTest {
+    private static final TinkerStorageGraph graph = TinkerStorageGraph.open();
+    private static final GraphTraversalSource g = traversal().with(graph);
+    private static final GraphService service = new GraphService(g);
+
+    @Test
+    public void shouldGetPersons() {
+        final List<Vertex> persons = service.getPersons();
+        assertEquals(6, persons.size());
+    }
+}
+
+// or perhaps, since we're using a remote graph provider, we feel it would be better to
+// start Gremlin Server with a TinkerStorageGraph configured using a docker container,
+// embedding it directly in our tests or running it as a separate process like:
+//
+// bin/gremlin-server.sh conf/gremlin-server-transaction.yaml
+//
+// and then connect to it with a driver in more of an integration test style. obviously,
+// with this approach you could also configure your production graph directly or use custom
+// build options to trigger different test configurations for a more dynamic approach
+public class GraphServiceTest {
+    private static final GraphTraversalSource g = traversal().with(
+            DriverRemoteConnection.using("localhost", 8182));
+    private static final GraphService service = new GraphService(g);
+
+    @Test
+    public void shouldGetPersons() {
+        final List<Vertex> persons = service.getPersons();
+        assertEquals(6, persons.size());
+    }
+}
+----
+
+WARNING: There can be subtle behavioral differences between TinkerGraph and the graph ultimately intended for use.
+Be aware of the differences when writing tests to ensure that you are testing behaviors of your applications
+appropriately.
+
+==== Best Practices
+
+Errors can occur before a transaction gets committed. Specifically for `TinkerStorageGraph`, you may encounter many
+`TransactionException` errors in a highly concurrent environment due its optimistic approach to locking. Users should
+follow the try-catch-rollback pattern described in the
+link:https://tinkerpop.apache.org/docs/x.y.z/reference/#transactions[transactions] section in combination with
+exponential backoff based retries to mitigate this issue.
+
+==== Performance Considerations
+
+While transactions impose minimal impact for mutating workloads, users should expect performance degradation for
+read-only work relative to the non-transactional configuration. However, its approach to locking
+(write-only, optimistic) and its in-memory nature, TinkerStorageGraph is likely faster than other `Graph`
+implementations that support transactions.
+
+==== Examples
+
+Constructing a simple graph using `TinkerStorageGraph` in Java is presented below:
+
+[source,java]
+----
+Graph graph = TinkerStorageGraph.open();
+g = traversal().with(graph)
+GraphTraversalSource gtx = g.tx().begin();
+
+try {
+  Vertex marko = gtx.addV("person").property("name","marko").property("age",29).next();
+  Vertex lop = gtx.addV("software").property("name","lop").property("lang","java").next();
+  gtx.addE("created").from(marko).to(lop).property("weight",0.6d).iterate();
+
+  gtx.tx().commit();
+} catch (Exception ex) {
+  gtx.tx().rollback();
+}
+----
+
+The above Gremlin creates two vertices named "marko" and "lop" and connects them via a created-edge with a weight=0.6
+property. In case of any errors `rollback()` will be called and no changes will be performed.
+
+To use the embedded TinkerStorageGraph in Gremlin Console:
+
+[gremlin-groovy]
+----
+graph = TinkerStorageGraph.open() <1>
+g = traversal().with(graph) <2>
+g.addV('test').property('name','one')
+g.tx().commit() <3>
+g.V().valueMap()
+g.addV('test').property('name','two') <4>
+g.V().valueMap()
+g.tx().rollback() <5>
+g.V().valueMap()
+----
+
+<1> Open transactional graph.
+<2> Spawn a GraphTraversalSource with transactional graph.
+<3> Commit the add vertex operation
+<4> Add a second vertex without committing
+<5> Rollback the change
+
+[[tinkergraph-gql]]
+=== TinkerGQL
+
+TinkerGraph ships with full support for the <<tinkergql,TinkerGQL>> dialect out of the box.
+`GqlDeclarativeMatchStrategy` is registered automatically when a `GraphTraversalSource` is created from
+a TinkerGraph instance, so no additional configuration is required:
+
+[gremlin-groovy,modern]
+----
+g.match("MATCH (a:person)-[:knows]->(b:person)")
+g.match("MATCH (a:person)-[:knows]->(b:person)").
+  select("a", "b").by("name")
+----
+
+See <<tinkergql>> for the complete TinkerGQL syntax reference, including supported patterns, property filters,
+parameterized queries, variable reuse, and known limitations.
+
+==== Index Integration
+
+TinkerGraph maintains in-memory indexes that the TinkerGQL executor consults automatically. When a vertex index
+exists on a property key that appears in an inline filter, the executor uses the index for the seed vertex lookup
+rather than scanning all vertices. This is especially effective when the same parameterized query is executed
+repeatedly with different parameter values — the query graph is parsed and cached once, and each invocation performs
+an index-backed lookup:
+
+[source,groovy]
+----
+graph.createIndex("name", Vertex.class)   // <1>
+names = ["marko", "josh", "peter", "vadas"]
+names.collect { name ->
+    g.match("MATCH (p:person {name: \$who})-[:knows]->(f:person)",
+            ["who": name]).
+      select("p", "f").by("name").toList()
+}
+----
+
+<1> Create the index once at graph setup time; all subsequent `match()` calls referencing `{name: $who}` use it
+automatically. Indexes created after a traversal source has already been built take effect on the next traversal
+execution.

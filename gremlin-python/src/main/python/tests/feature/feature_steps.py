@@ -1,0 +1,607 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+from collections.abc import Iterable
+from datetime import datetime, timedelta
+import base64
+import json
+import re
+import uuid
+from gremlin_python.statics import long, bigdecimal, SingleChar
+from gremlin_python.structure.graph import Path, Vertex, Graph, Edge, VertexProperty, Property, Tree
+from gremlin_python.process.anonymous_traversal import traversal
+from gremlin_python.process.graph_traversal import __
+from gremlin_python.process.traversal import Barrier, Cardinality, P, TextP, Pop, Scope, Column, Order, Direction, T, \
+    Pick, Operator, IO, WithOptions, Merge, GValue, GremlinLang
+from radish import given, when, then, world
+from hamcrest import *
+
+outV = __.out_v
+label = __.label
+inV = __.in_v
+project = __.project
+tail = __.tail
+
+ignores = [
+    "g.withSideEffect(\"x\",{}).V().both().both().sideEffect(__.store(\"x\").by(\"name\")).cap(\"x\").unfold()", # Objects must be both of Map or Collection: a=LinkedHashMap b=BulkSet???
+    'g.withSack(10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000n, Operator.assign).V().local(__.out("knows").barrier(Barrier.normSack)).in("knows").barrier().sack()', # issues with BigInteger/BigDecimal - why do we carry BigDecimal? just use python Decimal module?
+    "g.withSack(2).V().sack(Operator.div).by(__.constant(xx1)).sack()", # issues with BigInteger/BigDecimal - why do we carry BigDecimal? just use python Decimal module?
+    ## The following section has queries that aren't supported by gremlin-lang parameters
+    'g.V().branch(l1).option("a", __.values("age")).option("b", __.values("lang")).option("b", __.values("name"))',
+    'g.V().choose(pred1, __.out("knows"), __.in("created")).values("name")',
+    'g.V().repeat(__.both()).until(pred1).groupCount().by("name")',
+    'g.V().both().properties("name").order().by(c1).dedup().value()',
+    'g.V().filter(pred1)',
+    'g.V(vid1).filter(pred1)',
+    'g.V(vid2).filter(pred1)',
+    'g.V(vid1).out().filter(pred1)',
+    'g.E().filter(pred1)',
+    'g.V().out("created").has("name", __.map(l1).is(P.gt(3))).values("name")',
+    'g.V(vid1).map(l1)',
+    'g.V(vid1).outE().label().map(l1)',
+    'g.V(vid1).out().map(l1).map(l2)',
+    'g.withPath().V().as("a").out().map(l1)',
+    'g.withPath().V().as("a").out().out().map(l1)',
+    'g.V().values("name").order().by(c1).by(c2)',
+    'g.V().order().by("name", c1).by("name", c2).values("name")',
+    'g.V().hasLabel("person").order().by(l1, Order.desc).values("name")',
+    'g.V(v1).hasLabel("person").map(l1).order(Scope.local).by(Column.values, Order.desc).by(Column.keys, Order.asc)',
+    'g.V().valueMap().unfold().map(l1)',
+    'g.E(e11)',
+    'g.E(e7,e11)',
+    'g.E(xx1)',
+    'g.withSideEffect("a", xx1).V().both().values("name").aggregate(Scope.local,"a").cap("a")',
+    'g.V().group().by(l1).by(__.constant(1))',
+    'g.V(vid1).out().values("name").inject("daniel").as("a").map(l1).path()',
+    'g.V().group("a").by(l1).by(__.constant(1)).cap("a")',
+    'g.withSideEffect("a", xx1).V().both().values("name").store("a").cap("a")',
+]
+
+
+@given("the {graph_name:w} graph")
+def choose_graph(step, graph_name):
+    step.context.ignore = False
+    tagset = [tag.name for tag in step.all_tags]
+    if not step.context.ignore:
+        step.context.ignore = "AllowNullPropertyValues" in tagset
+
+    if not step.context.ignore:
+        step.context.ignore = "StepWrite" in tagset
+
+    # TINKERPOP-3055
+    if not step.context.ignore:
+        step.context.ignore = "WithReservedKeysVerificationStrategy" in tagset
+
+    if not step.context.ignore:
+        step.context.ignore = "MultiLabelDefault" in tagset
+
+    if (step.context.ignore):
+        return
+
+    # Multi-label tests use the gmultilabel traversal source for empty graphs
+    is_multilabel = "MultiLabel" in tagset
+    if is_multilabel and graph_name == "empty":
+        step.context.graph_name = "multilabel"
+        step.context.g = traversal().with_(step.context.remote_conn["multilabel"]).with_('language', 'gremlin-lang')
+    else:
+        step.context.graph_name = graph_name
+        step.context.g = traversal().with_(step.context.remote_conn[graph_name]).with_('language', 'gremlin-lang')
+
+
+@given("the graph initializer of")
+def initialize_graph(step):
+    if (step.context.ignore):
+        return
+
+    t = step.context.traversals.pop(0)(g=step.context.g)
+
+    # just be sure that the traversal returns something to prove that it worked to some degree. probably
+    # is overkill to try to assert the complete success of this init operation. presumably the test
+    # suite would fail elsewhere if this didn't work which would help identify a problem.
+    result = t.to_list()
+    assert len(result) > 0
+
+
+@given("an unsupported test")
+def unsupported_scenario(step):
+    # this is a do nothing step as the test can't be supported for whatever reason
+    return
+
+
+@given("using the parameter {param_name:w} defined as {param:QuotedString}")
+def add_parameter(step, param_name, param):
+    if (step.context.ignore):
+        return
+
+    if not hasattr(step.context, "traversal_params"):
+        step.context.traversal_params = {}
+
+    step.context.traversal_params[param_name] = _convert(param.replace('\\"', '"'), step.context)
+
+
+@given("using the side effect {key:w} defined as {value:QuotedString}")
+def add_side_effect(step, key, value):
+    if (step.context.ignore):
+        return
+
+    if not hasattr(step.context, "traversal_side_effects"):
+        step.context.traversal_side_effects = {}
+
+    step.context.traversal_side_effects[key] = _convert(value.replace('\\"', '"'), step.context)
+
+
+@given("the traversal of")
+def translate_traversal(step):
+    if step.context.ignore == False:
+        step.context.ignore = step.text in ignores
+    if step.context.ignore:
+        return
+
+    p = {}
+    if hasattr(step.context, "traversal_params"):
+        # user flag "parameterize", when set to 'true' will use GValue to parameterize parameters instead of flattening them out into string
+        if world.config.user_data.get("parameterize"):
+            for k, v in step.context.traversal_params.items():
+                p[k] = GValue(k, v)
+        else:
+            p = step.context.traversal_params
+
+    localg = step.context.g.with_('language', 'gremlin-lang')
+    tagset = [tag.name for tag in step.all_tags]
+    if "GraphComputerOnly" in tagset:
+        localg = step.context.g.with_('language', 'gremlin-lang').with_computer()
+    p['g'] = localg
+    step.context.traversal = step.context.traversals.pop(0)(**p)
+
+    if hasattr(step.context, "traversal_side_effects"):
+        gremlin_lang = GremlinLang()
+        for key in step.context.traversal_side_effects:
+            gremlin_lang.add_source("withSideEffect", key, step.context.traversal_side_effects[key])
+        step.context.traversal.gremlin_lang.gremlin = gremlin_lang.gremlin + step.context.traversal.gremlin_lang.gremlin # prepend the side effects to the query
+
+
+@when("iterated to list")
+def iterate_the_traversal(step):
+    if step.context.ignore:
+        return
+
+    try:
+        step.context.result = list(map(lambda x: _convert_results(x), step.context.traversal.to_list()))
+        step.context.failed = False
+        step.context.failed_message = ''
+    except Exception as e:
+        step.context.failed = True
+        step.context.failed_message = getattr(e, 'message', repr(e))
+
+
+@when("iterated next")
+def next_the_traversal(step):
+    if step.context.ignore:
+        return
+
+    try:
+        res = step.context.traversal.next()
+        res_iter = [res] if (not isinstance(res, Iterable) or isinstance(res, (str, bytes))) else res
+        step.context.result = [ _convert_results(x) for x in res_iter ]
+        step.context.failed = False
+        step.context.failed_message = ''
+    except Exception as e:
+        step.context.failed = True
+        step.context.failed_message = getattr(e, 'message', repr(e))
+
+
+@then("the traversal will raise an error")
+def raise_an_error(step):
+    if (step.context.ignore):
+        return
+
+    assert_that(step.context.failed, equal_to(True))
+
+
+@then("the traversal will raise an error with message {comparison:w} text of {expected_message:QuotedString}")
+def raise_an_error_with_message(step, comparison, expected_message):
+    if (step.context.ignore):
+        return
+
+    assert_that(step.context.failed, equal_to(True))
+
+    if comparison == "containing":
+        assert_that(step.context.failed_message.upper(), contains_string(expected_message.upper()))
+    elif comparison == "ending":
+        assert_that(step.context.failed_message.upper(), ends_with(expected_message.upper()))
+    elif comparison == "starting":
+        assert_that(step.context.failed_message.upper(), starts_with(expected_message.upper()))
+    else:
+        raise ValueError("unknown comparison '" + comparison + "'- must be: containing, ending or starting")
+
+
+@then("the result should be {characterized_as:w}")
+def assert_result(step, characterized_as):
+    if step.context.ignore:
+        return
+
+    assert_that(step.context.failed, equal_to(False), step.context.failed_message)
+
+    if characterized_as == "empty":  # no results
+        assert_that(len(step.context.result), equal_to(0))
+    elif characterized_as == "ordered":  # results asserted in the order of the data table
+        _table_assertion(step.table, step.context.result, step.context, True)
+    elif characterized_as == "unordered":  # results asserted in any order
+        _table_assertion(step.table, step.context.result, step.context, False)
+    elif characterized_as == "of":  # results may be of any of the specified items in the data table
+        _any_assertion(step.table, step.context.result, step.context)
+    else:
+        raise ValueError("unknown data characterization of " + characterized_as)
+
+
+@then("the result should be a subgraph with the following")
+def assert_subgraph(step):
+    if step.context.ignore:
+        return
+
+    assert_that(step.context.failed, equal_to(False), step.context.failed_message)
+
+    # result should be a graph
+    sg = step.context.result[0]
+    assert_that(sg, instance_of(Graph))
+
+    # the first item in the datatable tells us what we are asserting
+    if not getattr(step, "table", None):
+        return
+    column_name = next(iter(step.table[0].keys()))
+    asserting_vertices = column_name == "vertices"
+
+    if asserting_vertices:
+        expected_vertices = [_convert(line[column_name], step.context) for line in step.table]
+        assert_that(len(sg.vertices), equal_to(len(expected_vertices)))
+
+        for expected in expected_vertices:
+            assert_that(expected.id, is_in(sg.vertices))
+            actual = sg.vertices[expected.id]
+            assert_that(actual.label, equal_to(expected.label))
+
+            variable_key = "age" if actual.label == "person" else "lang"
+            assert_that(actual["name"], equal_to(expected["name"]))
+            assert_that(actual[variable_key], equal_to(expected[variable_key]))
+    else:
+        expected_edges = [_convert(line[column_name], step.context) for line in step.table]
+        assert_that(len(sg.edges), equal_to(len(expected_edges)))
+
+        for expected in expected_edges:
+            assert_that(expected.id, is_in(sg.edges))
+            actual = sg.edges[expected.id]
+            assert_that(actual.label, equal_to(expected.label))
+            assert_that(actual["weight"], equal_to(expected["weight"]))
+            assert_that(actual.outV.id, equal_to(expected.outV.id))
+            assert_that(actual.inV.id, equal_to(expected.inV.id))
+
+
+class _TreeNode(object):
+    """One node of an expected tree parsed from a Gherkin ascii-tree docstring:
+    a parsed key value with its ordered children."""
+
+    def __init__(self, value):
+        self.value = value
+        self.children = []
+
+
+def _parse_tree(ascii_tree, ctx):
+    """Parses an ascii-tree docstring into root nodes. A line's depth is its
+    leading-space count divided by three; the node value is the line with the
+    leading ``|--`` stripped, trimmed, and passed through ``_convert``. An empty
+    docstring yields no roots."""
+    roots = []
+    if not ascii_tree:
+        return roots
+
+    level_map = {}
+    for line in re.split(r"\r\n|\r|\n", ascii_tree):
+        if len(line) == 0:
+            continue
+
+        leading_spaces = len(line) - len(line.lstrip(" "))
+        level = leading_spaces // 3  # 3 spaces per level
+        raw_value = line.replace("|--", "", 1).strip()
+
+        node = _TreeNode(_convert(raw_value, ctx))
+        if level == 0:
+            roots.append(node)
+        else:
+            level_map[level - 1].children.append(node)
+        level_map[level] = node
+
+    return roots
+
+
+def _validate_tree_structure(actual_tree, expected_node):
+    """Recursively asserts that ``actual_tree`` matches ``expected_node``: the
+    child count must match and every expected child must be present and
+    recursively match."""
+    assert_that(len(actual_tree.root_nodes()), equal_to(len(expected_node.children)),
+                "tree child count does not match at " + str(expected_node.value))
+    for child in expected_node.children:
+        assert_that(actual_tree.has_child(child.value), equal_to(True),
+                    "tree not matching at " + str(child.value))
+        _validate_tree_structure(actual_tree.child_at(child.value), child)
+
+
+@then("the result should be a tree with a structure of")
+def assert_tree_structure(step):
+    if step.context.ignore:
+        return
+
+    assert_that(step.context.failed, equal_to(False), step.context.failed_message)
+
+    # The traversal yields a single Tree (via "iterated next").
+    tree = step.context.result[0]
+    assert_that(tree, instance_of(Tree))
+
+    # an empty docstring represents an empty tree
+    roots = _parse_tree(step.text, step.context)
+
+    assert_that(len(tree.root_nodes()), equal_to(len(roots)),
+                "tree root node count does not match expected structure")
+    for root in roots:
+        assert_that(tree.has_child(root.value), equal_to(True),
+                    "tree not matching at " + str(root.value))
+        _validate_tree_structure(tree.child_at(root.value), root)
+
+
+@then("the graph should return {count:d} for count of {traversal_string:QuotedString}")
+def assert_side_effects(step, count, traversal_string):
+    if step.context.ignore:
+        return
+
+    assert_that(step.context.failed, equal_to(False), step.context.failed_message)
+
+    p = step.context.traversal_params if hasattr(step.context, "traversal_params") else {}
+    p['g'] = step.context.g
+    t = step.context.traversals.pop(0)(**p)
+
+    assert_that(t.count().next(), equal_to(count))
+
+
+@then("the result should have a count of {count:d}")
+def assert_count(step, count):
+    if step.context.ignore:
+        return
+
+    assert_that(step.context.failed, equal_to(False), step.context.failed_message)
+
+    assert_that(len(list(step.context.result)), equal_to(count))
+
+
+@then("nothing should happen because")
+def nothing_happening(step):
+    return
+
+
+@then("the file {file:QuotedString} should exist")
+def unsupported_scenario(step, file):
+    # this is a do nothing step as the test can't be supported in remote cases
+    return
+
+
+def _split_by_element(s):
+    depth = 0
+    current = []
+    results = []
+    for c in s:
+        if c == '[':
+            depth += 1
+            current.append(c)
+        elif c == ']':
+            depth -= 1
+            current.append(c)
+        elif c == ',' and depth == 0:
+            results.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(c)
+    if current:
+        results.append(''.join(current).strip())
+    return results
+
+
+def _parse_duration(dur_str):
+    """Parses a duration from seconds,nanos[,isPositive] format into a timedelta."""
+    parts = dur_str.split(",")
+    seconds = int(parts[0].strip())
+    nanos = int(parts[1].strip())
+    is_positive = len(parts) < 3 or parts[2].strip() == "true"
+    # timedelta has microsecond resolution; sub-microsecond nanos are truncated
+    td = timedelta(seconds=seconds, microseconds=nanos // 1000)
+    return td if is_positive else -td
+
+
+def _convert(val, ctx):
+    graph_name = ctx.graph_name
+    if isinstance(val, dict):  # convert dictionary keys/values
+        n = {}
+        for key, value in val.items():
+            k = _convert(key, ctx)
+            # convert to tuple key if list/set as neither are hashable
+            n[tuple(k) if isinstance(k, (set, list)) else k] = _convert(value, ctx)
+        return n
+    elif isinstance(val, str) and re.match(r"^l\[.*\]$", val):  # parse list
+        return [] if val == "l[]" else list(map((lambda x: _convert(x, ctx)), _split_by_element(val[2:-1])))
+    elif isinstance(val, str) and re.match(r"^s\[.*\]$", val):  # parse set
+        return set() if val == "s[]" else set(map((lambda x: _convert(x, ctx)), _split_by_element(val[2:-1])))
+    elif isinstance(val, str) and re.match(r"^str\[.*\]$", val):  # return string as is
+        return val[4:-1]
+    elif isinstance(val, str) and re.match(r"^dt\[.*\]$", val):  # parse datetime
+        # python 3.8 can handle only subset of ISO 8601 dates
+        return datetime.fromisoformat(val[3:-1].replace('Z', '+00:00'))
+    elif isinstance(val, str) and re.match(r"^uuid\[.*\]$", val):  # parse uuid
+        name = val[5:-1]  # strip 'uuid[...]' or similar format
+        return uuid.UUID(name)
+    elif isinstance(val, str) and re.match(r"^char\[.\]$", val):  # parse char
+        return SingleChar(val[5:-1])
+    elif isinstance(val, str) and re.match(r"^dur\[.*\]$", val):  # parse duration
+        return _parse_duration(val[4:-1])
+    elif isinstance(val, str) and re.match(r"^bin\[.*\]$", val):  # parse binary
+        return base64.b64decode(val[4:-1])
+    elif isinstance(val, str) and re.match(r"^d\[NaN\]$", val):  # parse nan
+        return float("nan")
+    elif isinstance(val, str) and re.match(r"^d\[Infinity\]$", val):  # parse +inf
+        return float("inf")
+    elif isinstance(val, str) and re.match(r"^d\[-Infinity\]$", val):  # parse -inf
+        return float("-inf")
+    elif isinstance(val, str) and re.match(r"^d\[.*\]\.[bsilfdn]$", val):  # parse numeric
+        return float(val[2:-3]) if val[2:-3].__contains__(".") else long(val[2:-3])
+    elif isinstance(val, str) and re.match(r"^d\[.*\]\.m$", val):  # parse bigDecimal
+        return bigdecimal(val[2:-3])
+    elif isinstance(val, str) and re.match(r"^v\[.*\]\.id$", val):  # parse vertex id
+        return __find_cached_element(ctx, graph_name, val[2:-4], "v").id
+    elif isinstance(val, str) and re.match(r"^v\[.*\]\.sid$", val):  # parse vertex id as string
+        return str(__find_cached_element(ctx, graph_name, val[2:-5], "v").id)
+    elif isinstance(val, str) and re.match(r"^v\[.*\]$", val):  # parse vertex
+        return __find_cached_element(ctx, graph_name, val[2:-1], "v")
+    elif isinstance(val, str) and re.match(r"^e\[.*\]\.id$", val):  # parse edge id
+        return __find_cached_element(ctx, graph_name, val[2:-4], "e").id
+    elif isinstance(val, str) and re.match(r"^e\[.*\]\.sid$", val):  # parse edge id as string
+        return str(__find_cached_element(ctx, graph_name, val[2:-5], "e").id)
+    elif isinstance(val, str) and re.match(r"^e\[.*\]$", val):  # parse edge
+        return __find_cached_element(ctx, graph_name, val[2:-1], "e")
+    elif isinstance(val, str) and re.match(r"^vp\[.*\]$", val):  # parse vertexproperty
+        return __find_cached_element(ctx, graph_name, val[3:-1], "vp")
+    elif isinstance(val, str) and re.match(r"^prop\[.+\]$", val):  # parse property as key/value pair
+        inner = val[5:-1]
+        comma_idx = inner.index(",")
+        key = inner[:comma_idx]
+        value = _convert(inner[comma_idx + 1:], ctx)
+        return Property(key, value, None)
+    elif isinstance(val, str) and re.match(r"^m\[.*\]$", val):  # parse json as a map
+        return _convert(json.loads(val[2:-1]), ctx)
+    elif isinstance(val, str) and re.match(r"^p\[.*\]$", val):  # parse path
+        path_objects = list(map((lambda x: _convert(x, ctx)), val[2:-1].split(",")))
+        return Path([set([])], path_objects)
+    elif isinstance(val, str) and re.match(r"^t\[.*\]$", val):  # parse instance of T enum
+        return T[val[2:-1]]
+    elif isinstance(val, str) and re.match(r"^D\[.*\]$", val):  # parse instance of Direction enum
+        return Direction[__alias_direction(val[2:-1])]
+    elif isinstance(val, str) and re.match(r"^M\[.*\]$", val):  # parse instance of Merge enum
+        return Merge[__alias_merge(val[2:-1])]
+    elif isinstance(val, str) and re.match(r"^null$", val):  # parse null to None
+        return None
+    elif isinstance(val, str) and re.match(r"^true$", val):  # parse to boolean
+        return True
+    elif isinstance(val, str) and re.match(r"^false$", val):  # parse to boolean
+        return False
+    else:
+        return val
+
+
+def __alias_direction(d):
+    return "from_" if d == "from" else d
+
+
+def __alias_merge(m):
+    if m == "inV":
+        return "in_v"
+    elif m == "outV":
+        return "out_v"
+    elif m == "onCreate":
+        return "on_create"
+    elif m == "onMatch":
+        return "on_match"
+    else:
+        return
+
+
+def __find_cached_element(ctx, graph_name, identifier, element_type):
+    if graph_name == "empty":
+        if element_type == "v":
+            cache = world.create_lookup_v(ctx.remote_conn["empty"])
+        elif element_type == "vp":
+            cache = world.create_lookup_vp(ctx.remote_conn["empty"])
+        else:
+            cache = world.create_lookup_e(ctx.remote_conn["empty"])
+    elif graph_name == "multilabel":
+        if element_type == "v":
+            cache = world.create_lookup_v(ctx.remote_conn["multilabel"])
+        elif element_type == "vp":
+            cache = world.create_lookup_vp(ctx.remote_conn["multilabel"])
+        else:
+            cache = world.create_lookup_e(ctx.remote_conn["multilabel"])
+    else:
+        if element_type == "v":
+            cache = ctx.lookup_v[graph_name]
+        elif element_type == "vp":
+            cache = ctx.lookup_vp[graph_name]
+        else:
+            cache = ctx.lookup_e[graph_name]
+
+    # try to lookup the element - if it can't be found then it must be a reference Vertex
+    if identifier in cache:
+        return cache[identifier]
+    else:
+        return Vertex(identifier)
+
+
+def _is_nan(val):
+    return isinstance(val, float) and (val != val)
+
+
+def _convert_results(val):
+    if isinstance(val, Path):
+        # kill out labels as they aren't in the assertion logic
+        return Path([set([])], val.objects)
+    elif isinstance(val, Property) and not isinstance(val, VertexProperty):
+        # strip element for key/value only comparison with prop[...] syntax
+        return Property(val.key, val.value, None)
+    elif _is_nan(val):
+        # we need to use the string form for NaN to test the results since float.nan != float.nan
+        return "d[NaN]"
+    else:
+        return val
+
+
+def _any_assertion(data, result, ctx):
+    converted = [_convert(line['result'], ctx) for line in data]
+    for r in result:
+        assert_that(r, is_in(converted))
+
+
+def _table_assertion(data, result, ctx, ordered):
+    # results from traversal should have the same number of entries as the feature data table
+    assert_that(len(result), equal_to(len(data)), "result:" + str(result))
+
+    results_to_test = list(result)
+
+    # finds a match in the results for each line of data to assert and then removes that item
+    # from the list - in the end there should be no items left over and each will have been asserted
+    for ix, line in enumerate(data):
+        val = _convert(line['result'], ctx)
+        # we need to use the string form for NaN to test the results since float.nan != float.nan
+        if _is_nan(val):
+            val = "d[NaN]"
+
+        # clear the labels since we don't define them in .feature files
+        if isinstance(val, Path):
+            val.labels = [set([])]
+
+        if ordered:
+            assert_that(results_to_test[ix], equal_to(val))
+        else:
+            assert_that(val, is_in(results_to_test))
+            results_to_test.remove(val)
+
+    if not ordered:
+        assert_that(len(results_to_test), is_(0))

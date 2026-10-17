@@ -1,0 +1,95 @@
+﻿#region License
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+#endregion
+
+using System.Collections.Generic;
+using System.Collections.Immutable;
+using System.Linq;
+
+namespace Gremlin.Net.Structure
+{
+    /// <summary>
+    ///     Represents a vertex.
+    /// </summary>
+    public class Vertex : Element
+    {
+        /// <summary>
+        ///     The default label to use for a vertex.
+        /// </summary>
+        public const string DefaultLabel = "vertex";
+
+        /// <summary>
+        ///     Initializes a new instance of the <see cref="Vertex" /> class.
+        /// </summary>
+        /// <param name="id">The id of the vertex.</param>
+        /// <param name="label">The label of the vertex.</param>
+        /// <param name="properties">Optional properties of the vertex.</param>
+        /// <param name="labels">Optional set of labels for multi-label support.</param>
+        public Vertex(object? id, string label = DefaultLabel, dynamic[]? properties = null,
+            IEnumerable<string>? labels = null)
+            : base(id, label, properties)
+        {
+            Labels = labels != null
+                ? ImmutableHashSet.CreateRange(labels)
+                : ImmutableHashSet.Create(label ?? DefaultLabel);
+        }
+
+        /// <summary>
+        ///     Gets all labels on this vertex.
+        /// </summary>
+        public IReadOnlySet<string> Labels { get; }
+
+        /// <summary>
+        /// Get property by key
+        /// </summary>
+        /// <returns>property or null when not found</returns>
+        public VertexProperty? Property(string key)
+        {
+            return Properties?.Cast<VertexProperty>().FirstOrDefault(p => p.Key == key);
+        }
+
+        /// <summary>
+        /// Groups this vertex's properties by key.
+        /// </summary>
+        /// <returns>A map of property key to the list of VertexProperty objects for that key (empty when none).</returns>
+        public Dictionary<string, List<VertexProperty>> PropertyMap()
+        {
+            var map = new Dictionary<string, List<VertexProperty>>();
+            foreach (var p in Properties.Cast<VertexProperty>())
+            {
+                if (!map.TryGetValue(p.Key, out var list))
+                {
+                    list = new List<VertexProperty>();
+                    map[p.Key] = list;
+                }
+                list.Add(p);
+            }
+            return map;
+        }
+
+        /// <inheritdoc />
+        public override string ToString()
+        {
+            return $"v[{Id}]";
+        }
+    }
+}

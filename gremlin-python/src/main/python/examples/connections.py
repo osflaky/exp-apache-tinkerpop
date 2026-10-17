@@ -1,0 +1,106 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+import ssl
+import sys
+import os
+
+sys.path.append("..")
+
+from gremlin_python.process.anonymous_traversal import traversal
+from gremlin_python.driver.driver_remote_connection import DriverRemoteConnection
+from gremlin_python.driver.auth import basic
+
+VERTEX_LABEL = os.getenv('VERTEX_LABEL', 'connection')
+
+def main():
+    with_remote()
+    with_auth()
+    with_configs()
+
+
+def with_remote():
+    # connect to a remote server that is compatible with the Gremlin Server protocol. for those who
+    # downloaded and are using Gremlin Server directly be sure that it is running locally with:
+    #
+    # bin/gremlin-server.sh console
+    #
+    # which starts it in "console" mode with an empty in-memory TinkerGraph ready to go bound to a
+    # variable named "g" as referenced in the following line.
+    # if there is a port placeholder in the env var then we are running with docker so set appropriate port
+    server_url = os.getenv('GREMLIN_SERVER_URL', 'http://localhost:8182/gremlin').format(45940)
+    rc = DriverRemoteConnection(server_url, 'g')
+    g = traversal().with_remote(rc)
+
+    # simple query to verify connection
+    v = g.add_v(VERTEX_LABEL).iterate()
+    count = g.V().has_label(VERTEX_LABEL).count().next()
+    print("Vertex count: " + str(count))
+
+    # cleanup
+    rc.close()
+
+
+# connecting with plain text authentication
+def with_auth():
+    # if there is a port placeholder in the env var then we are running with docker so set appropriate port
+    server_url = os.getenv('GREMLIN_SERVER_BASIC_AUTH_URL', 'http://localhost:8182/gremlin').format(45941)
+
+    # disable SSL certificate verification for CI environments
+    if ':45941' in server_url:
+        ssl_opts = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_opts.check_hostname = False
+        ssl_opts.verify_mode = ssl.CERT_NONE
+        rc = DriverRemoteConnection(server_url, 'g', auth=basic('stephen', 'password'),
+                                    ssl=ssl_opts)
+    else:
+        rc = DriverRemoteConnection(server_url, 'g', auth=basic('stephen', 'password'))
+
+    g = traversal().with_remote(rc)
+
+    v = g.add_v(VERTEX_LABEL).iterate()
+    count = g.V().has_label(VERTEX_LABEL).count().next()
+    print("Vertex count: " + str(count))
+
+    rc.close()
+
+# connecting with customized configurations
+def with_configs():
+    server_url = os.getenv('GREMLIN_SERVER_URL', 'http://localhost:8182/gremlin').format(45940)
+    # Custom headers are no longer a connection kwarg; set them via an interceptor.
+    def add_headers(request):
+        request.headers['x-custom-header'] = 'example'
+
+    rc = DriverRemoteConnection(
+        server_url, 'g',
+        max_connections=8,
+        connect_timeout_millis=5000,
+        idle_timeout_millis=180000,
+        keep_alive_time_millis=30000,
+        batch_size=64,
+        compression='none',
+        interceptors=[add_headers],
+    )
+    g = traversal().with_remote(rc)
+
+    v = g.add_v(VERTEX_LABEL).iterate()
+    count = g.V().has_label(VERTEX_LABEL).count().next()
+    print("Vertex count: " + str(count))
+
+    rc.close()
+
+if __name__ == "__main__":
+    main()

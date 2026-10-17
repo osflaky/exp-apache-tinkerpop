@@ -1,0 +1,330 @@
+<!--
+Licensed to the Apache Software Foundation (ASF) under one or more
+contributor license agreements.  See the NOTICE file distributed with
+this work for additional information regarding copyright ownership.
+The ASF licenses this file to You under the Apache License, Version 2.0
+(the "License"); you may not use this file except in compliance with
+the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.apache.tinkerpop</groupId>
+        <artifactId>gremlin-js</artifactId>
+        <version>4.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+    <artifactId>gremlin-javascript</artifactId>
+    <name>Apache TinkerPop :: Gremlin Javascript</name>
+    <properties>
+        <maven.test.skip>false</maven.test.skip>
+        <skipTests>${maven.test.skip}</skipTests>
+    </properties>
+    <build>
+        <directory>${basedir}/target</directory>
+        <finalName>${project.artifactId}-${project.version}</finalName>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>com.github.eirslett</groupId>
+                    <artifactId>frontend-maven-plugin</artifactId>
+                    <version>2.0.1</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+        <plugins>
+            <plugin>
+                <!--
+                Use gmavenplus-plugin to:
+                    - Generate js sources
+                -->
+                <groupId>org.codehaus.gmavenplus</groupId>
+                <artifactId>gmavenplus-plugin</artifactId>
+                <dependencies>
+                    <dependency>
+                        <groupId>org.apache.tinkerpop</groupId>
+                        <artifactId>gremlin-server</artifactId>
+                        <version>${project.version}</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.apache.tinkerpop</groupId>
+                        <artifactId>gremlin-test</artifactId>
+                        <version>${project.version}</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>commons-io</groupId>
+                        <artifactId>commons-io</artifactId>
+                        <version>${commons.io.version}</version>
+                    </dependency>
+					<dependency>
+						<groupId>ch.qos.logback</groupId>
+						<artifactId>logback-classic</artifactId>
+						<version>${logback.version}</version>
+						<scope>runtime</scope>
+					</dependency>
+                    <dependency>
+                        <groupId>org.apache.groovy</groupId>
+                        <artifactId>groovy-all</artifactId>
+                        <version>${groovy.version}</version>
+                        <type>pom</type>
+                        <scope>runtime</scope>
+                    </dependency>
+                </dependencies>
+                <executions>
+                    <execution>
+                        <id>generate-radish-support</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>execute</goal>
+                        </goals>
+                        <configuration>
+                            <properties>
+                                <property>
+                                    <name>projectBaseDir</name>
+                                    <value>${project.basedir}/../../</value>
+                                </property>
+                            </properties>
+                            <scripts>
+                                <script>${project.basedir}/scripts/groovy/generate.groovy</script>
+                            </scripts>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-clean-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <filesets>
+                        <fileset>
+                            <directory>build</directory>
+                        </fileset>
+                    </filesets>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>com.github.eirslett</groupId>
+                <artifactId>frontend-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>install node and npm at workspace root</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>install-node-and-npm</goal>
+                        </goals>
+                        <configuration>
+                            <workingDirectory>${project.basedir}/..</workingDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>npm workspace install</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>npm</goal>
+                        </goals>
+                        <configuration>
+                            <arguments>ci</arguments>
+                            <workingDirectory>${project.basedir}/..</workingDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>install node and npm</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>install-node-and-npm</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>npm lint</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>npm</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${skipTests}</skip>
+                            <arguments>run lint</arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>npm jsdoc</id>
+                        <goals>
+                            <goal>npm</goal>
+                        </goals>
+                        <phase>generate-resources</phase>
+                        <configuration>
+                            <arguments>run doc</arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+                <configuration>
+                    <workingDirectory>.</workingDirectory>
+                    <nodeVersion>${runtime.node.version}</nodeVersion>
+                    <npmVersion>${runtime.npm.version}</npmVersion>
+                </configuration>
+            </plugin>
+            <!--
+            there is no point to building/deploying the jvm stuff - there is no java source really - just poms
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <configuration>
+                    <skipSource>true</skipSource>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-install-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>com.google.code.maven-replacer-plugin</groupId>
+                <artifactId>replacer</artifactId>
+                <configuration>
+                    <file>lib/utils.ts</file>
+                    <replacements>
+                        <replacement>
+                            <token>gremlinVersion = '.*'</token>
+                            <value>gremlinVersion = '${project.version}'</value>
+                        </replacement>
+                    </replacements>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+    <profiles>
+        <!-- Test gremlin-javascript in Docker -->
+        <profile>
+            <id>glv-js</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <build>
+                <finalName>${project.artifactId}-${project.version}</finalName>
+                <plugins>
+                    <plugin>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <version>3.5.0</version>
+                        <executions>
+                            <execution>
+                                <id>run-tests</id>
+                                <phase>integration-test</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <skip>${skipTests}</skip>
+                                    <environmentVariables>
+                                        <GREMLIN_SERVER>${project.version}</GREMLIN_SERVER>
+                                        <ABS_PROJECT_HOME>${project.basedir}/../../</ABS_PROJECT_HOME>
+                                        <!-- setting this env variable is needed to be cross-platform compatible -->
+                                        <HOME>${user.home}</HOME>
+                                        <NODE_VERSION>${node.test.version}</NODE_VERSION>
+                                    </environmentVariables>
+                                    <executable>bash</executable>
+                                    <!--
+                                    Command breakdown:
+                                      compose down (first)   - remove any containers left over from a previously failed run
+                                      compose up             - build images, start the server and test containers,
+                                                               and wait for the test container to finish
+                                      compose down (second)  - tear down this run's containers and network
+                                      port-wait loop         - wait up to 30 s for ports 45940 and 45941 to be released by
+                                                               the Docker daemon before returning to Maven; all GLV modules share
+                                                               these host ports and run sequentially, so the next module would
+                                                               fail to bind them if docker-proxy has not fully exited yet
+                                      image prune            - remove dangling test images to reclaim disk space
+                                    -->
+                                    <arguments>
+                                        <argument>-c</argument>
+                                        <argument>export HOST_UID=$(id -u) HOST_GID=$(id -g); docker compose down; docker compose up --build --exit-code-from gremlin-js-integration-tests; EXIT=$?; docker compose down; for i in $(seq 1 30); do ss -tlnp | grep -qE ':(45940|45941) ' || break; sleep 1; done; docker image prune --filter label=maintainer=dev@tinkerpop.apache.org -f; exit $EXIT</argument>
+                                    </arguments>
+                                    <workingDirectory>.</workingDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!--
+        Provides a way to deploy the gremlin-javascript GLV to npm. This cannot be part of the standard maven execution
+        because npm does not have a staging environment like sonatype for releases. As soon as the release is
+        published it is public. In our release workflow, deploy occurs prior to vote on the release and we can't
+        make this stuff public until the vote is over.
+        -->
+        <profile>
+            <id>glv-javascript-deploy</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+                <property>
+                    <name>npm</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>com.github.eirslett</groupId>
+                        <artifactId>frontend-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>npm publish</id>
+                                <phase>deploy</phase>
+                                <goals>
+                                    <goal>npm</goal>
+                                </goals>
+                                <configuration>
+                                    <arguments>publish</arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <!--
+                            skip needs to be overridden given how the <configuration> is specified in the main build.
+                            it should be fine to just always deploy because this <profile> needs to be manually
+                            activated and that should be good enough given our deployment process.
+                            -->
+                            <skip>false</skip>
+                            <workingDirectory>.</workingDirectory>
+                            <nodeVersion>${runtime.node.version}</nodeVersion>
+                            <npmVersion>${runtime.npm.version}</npmVersion>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

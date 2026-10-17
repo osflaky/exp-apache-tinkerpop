@@ -1,0 +1,155 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+__author__ = 'Marko A. Rodriguez (http://markorodriguez.com), Lyndon Bauto (lyndonb@bitquilltech.com)'
+
+import os
+import pytest
+from pytest import fail
+
+from gremlin_python.driver import serializer
+from gremlin_python.driver.driver_remote_connection import DriverRemoteConnection
+from gremlin_python.structure.graph import Graph, Vertex
+from gremlin_python.process.anonymous_traversal import traversal
+from gremlin_python.process.traversal import P, Direction, T
+from gremlin_python.process.graph_traversal import __
+
+gremlin_server_url = os.environ.get('GREMLIN_SERVER_URL', 'ws://localhost:{}/gremlin')
+anonymous_url = gremlin_server_url.format(45940)
+
+
+class TestTraversal(object):
+
+    def test_P(self):
+        # verify that the order of operations is respected
+        assert "and(eq(a),lt(b))" == str(P.eq("a").and_(P.lt("b")))
+        assert "and(or(lt(b),gt(c)),neq(d))" == str(P.lt("b").or_(P.gt("c")).and_(P.neq("d")))
+        assert "and(or(lt(b),gt(c)),or(neq(d),gte(e)))" == str(
+            P.lt("b").or_(P.gt("c")).and_(P.neq("d").or_(P.gte("e"))))
+
+    def test_anonymous_traversal(self):
+        gremlin = __.__(1).gremlin_lang
+        assert "__.inject(1)" == gremlin.get_gremlin('__')
+
+        ##
+        gremlin = __.start().gremlin_lang
+        assert "" == gremlin.get_gremlin('')
+
+    def test_clone_traversal(self):
+        g = traversal().with_(None)
+        original = g.V().out("created")
+        clone = original.clone().out("knows")
+        cloneClone = clone.clone().out("created")
+
+        assert "g.V().out('created')" == original.gremlin_lang.get_gremlin()
+        assert "g.V().out('created').out('knows')" == clone.gremlin_lang.get_gremlin()
+        assert "g.V().out('created').out('knows').out('created')" == cloneClone.gremlin_lang.get_gremlin()
+
+        original.has("person", "name", "marko")
+        clone.V().out()
+
+        assert "g.V().out('created').has('person','name','marko')" == original.gremlin_lang.get_gremlin()
+        assert "g.V().out('created').out('knows').V().out()" == clone.gremlin_lang.get_gremlin()
+        assert "g.V().out('created').out('knows').out('created')" == cloneClone.gremlin_lang.get_gremlin()
+
+
+    def test_no_sugar_for_magic_methods(self):
+        g = traversal().with_(None)
+
+        t = g.V().age
+        assert "g.V().values('age')" == t.gremlin_lang.get_gremlin()
+
+        try:
+            t = g.V().__len__
+            fail("can't do sugar with magic")
+        except AttributeError as err:
+            assert str(
+                err) == 'Python magic methods or keys starting with double underscore cannot be used for Gremlin sugar - prefer values(__len__)'
+
+    def test_enforce_anonymous_child_traversal(self):
+        g = traversal().with_(None)
+        g.V(0).add_e("self").to(__.V(1))
+
+        try:
+            g.V(0).add_e("self").to(g.V(1))
+            assert False
+        except TypeError:
+            pass
+
+    def test_should_extract_id_from_vertex(self):
+        g = traversal().with_(None)
+
+        # Test basic V() step with mixed ID types
+        v_start = g.V(1, Vertex(2))
+        assert "g.V(1,2)" == v_start.gremlin_lang.get_gremlin()
+
+        # Test V() step in the middle of a traversal
+        v_mid = g.inject("foo").V(1, Vertex(2))
+        assert "g.inject('foo').V(1,2)" == v_mid.gremlin_lang.get_gremlin()
+
+        # Test edge creation with from/to vertices
+        from_to = g.add_e("Edge").from_(Vertex(1)).to(Vertex(2))
+        assert "g.addE('Edge').from(__.V(1)).to(__.V(2))" == from_to.gremlin_lang.get_gremlin()
+
+        # Test mergeE() with Vertex in dictionary
+        merge_map = {
+            T.label: "knows",
+            Direction.OUT: Vertex(1),
+            Direction.IN: Vertex(2)
+        }
+
+        merge_e_start = g.merge_e(merge_map)
+        assert "g.mergeE([(T.label):'knows',(Direction.OUT):1,(Direction.IN):2])" == merge_e_start.gremlin_lang.get_gremlin()
+
+        # Test mergeE() in the middle of a traversal
+        merge_e_mid = g.inject("foo").merge_e(merge_map)
+        assert "g.inject('foo').mergeE([(T.label):'knows',(Direction.OUT):1,(Direction.IN):2])" == merge_e_mid.gremlin_lang.get_gremlin()
+
+
+def create_connection_to_gtx():
+    return DriverRemoteConnection(anonymous_url, 'gtx')
+
+
+def add_node_validate_transaction_state(g, g_add_to, g_start_count, g_add_to_start_count, tx_verify_list):
+    # Add a single node to g_add_to, but not g.
+    # Check that vertex count in g is g_start_count and vertex count in g_add_to is g_add_to_start_count + 1.
+    g_add_to.add_v("person").property("name", "lyndon").iterate()
+    assert g_add_to.V().count().next() == g_add_to_start_count + 1
+    assert g.V().count().next() == g_start_count
+    verify_tx_state(tx_verify_list, True)
+
+
+def verify_tx_state(gtx_list, value):
+    for tx in gtx_list:
+        assert tx.isOpen() == value
+
+
+def drop_graph_check_count(g):
+    g.V().drop().iterate()
+    assert g.V().count().next() == 0
+
+
+def verify_gtx_closed(gtx):
+    try:
+        # Attempt to add an additional vertex to the transaction. This should throw an exception since it
+        # has been rolled back.
+        gtx().add_v("failure").iterate()
+        assert False
+    except Exception as e:
+        pass

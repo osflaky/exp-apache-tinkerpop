@@ -1,0 +1,281 @@
+/*
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+*/
+
+package gremlingo
+
+import (
+	"fmt"
+	"os"
+	"reflect"
+	"strconv"
+
+	gremlingo "github.com/apache/tinkerpop/gremlin-go/v4/driver"
+	"github.com/cucumber/godog"
+)
+
+type CucumberWorld struct {
+	scenario     *godog.Scenario
+	g            *gremlingo.GraphTraversalSource
+	graphName    string
+	traversal    *gremlingo.GraphTraversal
+	result       []interface{}
+	error        map[bool]string
+	graphDataMap map[string]*DataGraph
+	parameters   map[string]interface{}
+	sideEffects  map[string]interface{}
+}
+
+type DataGraph struct {
+	name             string
+	connection       *gremlingo.DriverRemoteConnection
+	vertices         map[string]*gremlingo.Vertex
+	vertexProperties map[string]*gremlingo.VertexProperty
+	edges            map[string]*gremlingo.Edge
+}
+
+func getEnvOrDefaultString(key string, defaultValue string) string {
+	// Missing value is returned as "".
+	value := os.Getenv(key)
+	if len(value) != 0 {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnvOrDefaultInt(key string, defaultValue int) int {
+	value := getEnvOrDefaultString(key, "")
+	if len(value) != 0 {
+		intValue, err := strconv.Atoi(value)
+		if err == nil {
+			return intValue
+		}
+	}
+	return defaultValue
+}
+
+func scenarioUrl() string {
+	return getEnvOrDefaultString("GREMLIN_SERVER_URL", "http://localhost:45940/gremlin")
+}
+
+func NewCucumberWorld() *CucumberWorld {
+	return &CucumberWorld{
+		scenario:     nil,
+		g:            nil,
+		graphName:    "",
+		traversal:    nil,
+		result:       nil,
+		error:        make(map[bool]string),
+		graphDataMap: make(map[string]*DataGraph),
+		parameters:   make(map[string]interface{}),
+		sideEffects:  make(map[string]interface{}),
+	}
+}
+
+var graphNames = []string{"modern", "classic", "crew", "grateful", "sink", "zoo", "empty", "multilabel"}
+
+func (t *CucumberWorld) getDataGraphFromMap(name string) *DataGraph {
+	if val, ok := t.graphDataMap[name]; ok {
+		return val
+	} else {
+		return nil
+	}
+}
+
+func (t *CucumberWorld) loadAllDataGraph() {
+	for _, name := range graphNames {
+		if name == "empty" {
+			t.loadEmptyDataGraph()
+		} else if name == "multilabel" {
+			t.loadMultilabelDataGraph()
+		} else {
+			connection, err := gremlingo.NewDriverRemoteConnection(scenarioUrl(),
+				func(settings *gremlingo.DriverRemoteConnectionSettings) {
+					settings.TraversalSource = "g" + name
+				})
+			if err != nil {
+				panic(fmt.Sprintf("Failed to create connection '%v'", err))
+			}
+			g := gremlingo.Traversal_().With(connection).With("language", "gremlin-lang")
+			t.graphDataMap[name] = &DataGraph{
+				name:             name,
+				connection:       connection,
+				vertices:         getVertices(g),
+				vertexProperties: getVertexProperties(g),
+				edges:            getEdges(g),
+			}
+		}
+	}
+}
+
+func (t *CucumberWorld) loadEmptyDataGraph() {
+	connection, _ := gremlingo.NewDriverRemoteConnection(scenarioUrl(), func(settings *gremlingo.DriverRemoteConnectionSettings) {
+		settings.TraversalSource = "ggraph"
+	})
+	t.graphDataMap["empty"] = &DataGraph{connection: connection}
+}
+
+func (t *CucumberWorld) loadMultilabelDataGraph() {
+	connection, _ := gremlingo.NewDriverRemoteConnection(scenarioUrl(), func(settings *gremlingo.DriverRemoteConnectionSettings) {
+		settings.TraversalSource = "gmultilabel"
+	})
+	t.graphDataMap["multilabel"] = &DataGraph{connection: connection}
+}
+
+func (t *CucumberWorld) reloadEmptyData() {
+	graphData := t.getDataGraphFromMap("empty")
+	g := gremlingo.Traversal_().With(graphData.connection).With("language", "gremlin-lang")
+	graphData.vertices = getVertices(g)
+	graphData.edges = getEdges(g)
+}
+
+func (t *CucumberWorld) reloadMultilabelData() {
+	graphData := t.getDataGraphFromMap("multilabel")
+	g := gremlingo.Traversal_().With(graphData.connection).With("language", "gremlin-lang")
+	graphData.vertices = getVertices(g)
+	graphData.edges = getEdges(g)
+}
+
+func (t *CucumberWorld) cleanEmptyDataGraph(g *gremlingo.GraphTraversalSource) error {
+	future := g.V().Drop().Iterate()
+	return <-future
+}
+
+func getVertices(g *gremlingo.GraphTraversalSource) map[string]*gremlingo.Vertex {
+	vertexMap := make(map[string]*gremlingo.Vertex)
+	res, err := g.V().Group().By("name").By(gremlingo.T__.Tail()).Next()
+	if res == nil {
+		return nil
+	}
+	if err != nil {
+		return nil
+	}
+	v := reflect.ValueOf(res.GetInterface())
+	if v.Kind() != reflect.Map {
+		fmt.Printf("Expecting to get a map as a result, got %v instead.", v.Kind())
+		return nil
+	}
+	keys := v.MapKeys()
+	for _, k := range keys {
+		convKey := k.Convert(v.Type().Key())
+		val := v.MapIndex(convKey)
+		vertexMap[k.Interface().(string)] = val.Interface().(*gremlingo.Vertex)
+	}
+	return vertexMap
+}
+
+func getEdges(g *gremlingo.GraphTraversalSource) map[string]*gremlingo.Edge {
+	edgeMap := make(map[string]*gremlingo.Edge)
+	resE, err := g.E().Group().
+		By(gremlingo.T__.Project("o", "l", "i").
+			By(gremlingo.T__.OutV().Values("name")).
+			By(gremlingo.T__.Label()).
+			By(gremlingo.T__.InV().Values("name"))).
+		By(gremlingo.T__.Tail()).Next()
+	if err != nil {
+		return nil
+	}
+	valMap := reflect.ValueOf(resE.GetInterface())
+	if valMap.Kind() != reflect.Map {
+		fmt.Printf("Expecting to get a map as a result, got %v instead.", valMap.Kind())
+		return nil
+	}
+	keys := valMap.MapKeys()
+	for _, k := range keys {
+		convKey := k.Convert(valMap.Type().Key())
+		val := valMap.MapIndex(convKey)
+		keyMap := reflect.ValueOf(k.Interface()).Elem().Interface().(map[interface{}]interface{})
+		edgeMap[getEdgeKey(keyMap)] = val.Interface().(*gremlingo.Edge)
+	}
+	return edgeMap
+}
+
+func getEdgeKey(edgeKeyMap map[interface{}]interface{}) string {
+	return fmt.Sprint(edgeKeyMap["o"], "-", edgeKeyMap["l"], "->", edgeKeyMap["i"])
+}
+
+func getVertexProperties(g *gremlingo.GraphTraversalSource) map[string]*gremlingo.VertexProperty {
+	vertexPropsMap := make(map[string]*gremlingo.VertexProperty)
+	res, err := g.V().Properties().Group().
+		By(gremlingo.T__.Project("n", "k", "v").
+			By(gremlingo.T__.Element().Values("name")).
+			By(gremlingo.T__.Key()).
+			By(gremlingo.T__.Value())).
+		By(gremlingo.T__.Tail()).Next()
+	if res == nil {
+		return nil
+	}
+	if err != nil {
+		return nil
+	}
+	valMap := reflect.ValueOf(res.GetInterface())
+	if valMap.Kind() != reflect.Map {
+		fmt.Printf("Expecting to get a map as a result, got %v instead.", valMap.Kind())
+		return nil
+	}
+	keys := valMap.MapKeys()
+	for _, k := range keys {
+		convKey := k.Convert(valMap.Type().Key())
+		val := valMap.MapIndex(convKey)
+		keyMap := reflect.ValueOf(k.Interface()).Elem().Interface().(map[interface{}]interface{})
+		vertexPropsMap[getVPKey(keyMap)] = val.Interface().(*gremlingo.VertexProperty)
+	}
+	return vertexPropsMap
+}
+
+func getVPKey(vpKeyMap map[interface{}]interface{}) string {
+	k := vpKeyMap["k"]
+	v := vpKeyMap["v"]
+	if k == "weight" {
+		v = fmt.Sprint("d[", v, "].d")
+	} else if k == "age" || k == "since" || k == "skill" {
+		v = fmt.Sprint("d[", v, "].i")
+	}
+	// Format as n-k->v
+	return fmt.Sprint(vpKeyMap["n"], "-", k, "->", v)
+}
+
+// This function is used to isolate connection problems to each scenario, and used in the Before context hook to prevent
+// a failing test in one scenario closing the shared connection that leads to failing subsequent scenario tests.
+// This function can be removed once all pending tests pass.
+func (t *CucumberWorld) recreateAllDataGraphConnection() error {
+	var err error
+	for _, name := range graphNames {
+		if name == "empty" {
+			t.getDataGraphFromMap(name).connection, err = gremlingo.NewDriverRemoteConnection(scenarioUrl(), func(settings *gremlingo.DriverRemoteConnectionSettings) {
+				settings.TraversalSource = "ggraph"
+			})
+		} else if name == "multilabel" {
+			t.getDataGraphFromMap(name).connection, err = gremlingo.NewDriverRemoteConnection(scenarioUrl(), func(settings *gremlingo.DriverRemoteConnectionSettings) {
+				settings.TraversalSource = "gmultilabel"
+			})
+		} else {
+			t.getDataGraphFromMap(name).connection, err = gremlingo.NewDriverRemoteConnection(scenarioUrl(), func(settings *gremlingo.DriverRemoteConnectionSettings) {
+				settings.TraversalSource = "g" + name
+			})
+		}
+	}
+	return err
+}
+
+func (t *CucumberWorld) closeAllDataGraphConnection() error {
+	for _, name := range graphNames {
+		t.getDataGraphFromMap(name).connection.Close()
+	}
+	return nil
+}

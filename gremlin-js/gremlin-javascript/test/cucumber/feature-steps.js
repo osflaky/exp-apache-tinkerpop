@@ -1,0 +1,663 @@
+/*
+ *  Licensed to the Apache Software Foundation (ASF) under one
+ *  or more contributor license agreements.  See the NOTICE file
+ *  distributed with this work for additional information
+ *  regarding copyright ownership.  The ASF licenses this file
+ *  to you under the Apache License, Version 2.0 (the
+ *  "License"); you may not use this file except in compliance
+ *  with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing,
+ *  software distributed under the License is distributed on an
+ *  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ *  KIND, either express or implied.  See the License for the
+ *  specific language governing permissions and limitations
+ *  under the License.
+ */
+
+/**
+ * @author Jorge Bay Gondra
+ */
+
+import chaiString from 'chai-string';
+import { Given, Then, When, setDefaultTimeout } from '@cucumber/cucumber';
+// Setting Cucumber timeout to 10s for Floating Errors on Windows on GitHub Actions
+setDefaultTimeout(10 * 1000);
+import { use, expect } from 'chai';
+use(chaiString);
+import { inspect, format, inherits } from 'util';
+import { gremlin } from './gremlin.js';
+import { Path, Vertex, Edge, Property, Graph, Tree } from '../../lib/structure/graph.js';
+import { statics } from '../../lib/process/graph-traversal.js';
+import { t, P, direction, merge, barrier, cardinality, column, order, TextP, IO, pick, pop, scope, operator, withOptions } from '../../lib/process/traversal.js';
+import { toLong } from '../../lib/utils.js';
+import { GValue } from '../../lib/process/gvalue.js';
+import anon from '../../lib/process/anonymous-traversal.js';
+const __ = statics;
+const parameterize = process.env.PARAMETERIZE === 'true';
+import { deepMembersById } from './element-comparison.js';
+import { Buffer } from 'buffer';
+import GremlinLang from "../../lib/process/gremlin-lang.js";
+const parsers = [
+  [ 'str\\[(.*)\\]', (stringValue) => stringValue ], //returns the string value as is
+  [ 'vp\\[(.+)\\]', toVertexProperty ],
+  [ 'prop\\[(.+)\\]', toProperty ],
+  [ 'dt\\[(.+)\\]', toDateTime ],
+  [ 'uuid\\[(.+)\\]', toUuid ],
+  [ 'd\\[(.*)\\]\\.[bsilfdmn]', toNumeric ],
+  [ 'bin\\[(.*)\\]', toBinary ],
+  [ 'v\\[(.+)\\]', toVertex ],
+  [ 'v\\[(.+)\\]\\.id', toVertexId ],
+  [ 'v\\[(.+)\\]\\.sid', toVertexIdString ],
+  [ 'e\\[(.+)\\]', toEdge ],
+  [ 'e\\[(.+)\\]\\.id', toEdgeId ],
+  [ 'e\\[(.+)\\]\\.sid', toEdgeIdString ],
+  [ 'vp\\[(.+)\\]', toVertexProperty ],
+  [ 'p\\[(.+)\\]', toPath ],
+  [ 'l\\[(.*)\\]', toArray ],
+  [ 's\\[(.*)\\]', toSet ],
+  [ 'm\\[(.+)\\]', toMap ],
+  [ 't\\[(.+)\\]', toT ],
+  [ 'D\\[(.+)\\]', toDirection ],
+  [ 'M\\[(.+)\\]', toMerge ]
+].map(x => [ new RegExp('^' + x[0] + '$'), x[1] ]);
+
+use(function (chai, chaiUtils) {
+  chai.Assertion.overwriteMethod('members', function (_super) {
+    return deepMembersById;
+  });
+});
+
+const ignoreReason = {
+  classNotSupported: "Javascript does not support the class type in GraphBinary",
+  nullKeysInMapNotSupportedWell: "Javascript does not nicely support 'null' as a key in Map instances",
+  floatingPointIssues: "Javascript floating point numbers not working in this case",
+  uuidSerializationIssues: "Javascript does not serialize to a UUID object, which complicates test assertions",
+  needsFurtherInvestigation: '',
+};
+
+// An associative array for ignored feature tests containing the scenario name as key
+const ignoredScenarios = {
+   // floating point issues
+  'g_withSackXBigInteger_TEN_powX1000X_assignX_V_localXoutXknowsX_barrierXnormSackXX_inXknowsX_barrier_sack': new IgnoreError(ignoreReason.floatingPointIssues),
+  'g_withSackX2X_V_sackXdivX_byXconstantX4_0XX_sack': new IgnoreError(ignoreReason.floatingPointIssues),
+  // uuid issues
+  'g_inject_order_byXdescX': new IgnoreError(ignoreReason.uuidSerializationIssues),
+  'g_inject_order': new IgnoreError(ignoreReason.uuidSerializationIssues),
+  // GremlinLang converts number to "integer" which is unparseable with floatLiteral in grammar
+  'g_V_coinX1X': new IgnoreError(ignoreReason.floatingPointIssues),
+  'g_V_coinX0X': new IgnoreError(ignoreReason.floatingPointIssues),
+  'g_V_hasLabelXsoftwareX_hasXname_rippleX_pageRankX1X_withXedges_inEXcreatedX_withXtimes_1X_withXpropertyName_priorsX_inXcreatedX_unionXboth__identityX_valueMapXname_priorsX': new IgnoreError(ignoreReason.floatingPointIssues),
+  'g_V_outXcreatedX_groupXmX_byXlabelX_pageRankX1X_withXpropertyName_pageRankX_withXedges_inEX_withXtimes_1X_inXcreatedX_groupXmX_byXpageRankX_capXmX': new IgnoreError(ignoreReason.floatingPointIssues),
+  'g_V_peerPressure_withXpropertyName_clusterX_withXedges_outEXknowsXX_pageRankX1X_byXrankX_withXedges_outEXknowsX_withXtimes_2X_group_byXclusterX_byXrank_sumX_limitX100X': new IgnoreError(ignoreReason.floatingPointIssues),
+};
+
+Given(/^the (.+) graph$/, function (graphName) {
+  // if the scenario is ignored then skip the test
+  if (ignoredScenarios[this.scenario]) {
+    return 'skipped';
+  }
+
+  // Multi-label tests use the gmultilabel traversal source for empty graphs
+  if (this.isMultiLabel && graphName === 'empty') {
+    this.graphName = 'multilabel';
+  } else {
+    this.graphName = graphName;
+  }
+  const data = this.getData();
+  this.g = anon.traversal().with_(data.connection);
+
+  if (this.isGraphComputer) {
+    this.g = this.g.withComputer();
+  }
+
+  if (this.graphName === 'empty') {
+    return this.cleanEmptyGraph();
+  }
+  if (this.graphName === 'multilabel') {
+    return this.cleanMultilabelGraph();
+  }
+});
+
+Given('the graph initializer of', function (traversalText) {
+  const p = Object.assign({}, this.parameters);
+  p.g = this.g;
+  const traversal = gremlin[this.scenario].shift()(p);
+  return traversal.toList().then(() => {
+    // Reload vertex/edge data for dynamic graphs after initializer adds data
+    if (this.graphName === 'empty') {
+      return this.loadEmptyGraphData();
+    } else if (this.graphName === 'multilabel') {
+      return this.loadMultilabelGraphData();
+    }
+  });
+});
+
+Given('an unsupported test', () => {});
+
+Given('the traversal of', function (traversalText) {
+  const p = Object.assign({}, this.parameters);
+  if (parameterize) {
+    for (const k of Object.keys(p)) {
+      p[k] = new GValue(k, p[k]);
+    }
+  }
+  p.g = this.g;
+  this.traversal = gremlin[this.scenario].shift()(p);
+  const sideEffectLang = new GremlinLang();
+  for (const key in this.sideEffects) {
+    sideEffectLang.addSource('withSideEffect', [key, this.sideEffects[key]]);
+  }
+  // prepend the side effects to the query
+  this.traversal.getGremlinLang().gremlin = sideEffectLang.gremlin + this.traversal.getGremlinLang().gremlin;
+});
+
+Given(/^using the parameter (.+) defined as "(.+)"$/, function (paramName, stringValue) {
+  // Remove escaped chars
+  stringValue = stringValue.replace(/\\"/g, '"');
+  let p = Promise.resolve();
+  if (this.graphName === 'empty') {
+    p = this.loadEmptyGraphData();
+  } else if (this.graphName === 'multilabel') {
+    p = this.loadMultilabelGraphData();
+  }
+  return p.then(() => {
+    this.parameters[paramName] = parseValue.call(this, stringValue);
+  }).catch(err => {
+    if (err instanceof IgnoreError) {
+      return 'skipped';
+    }
+    throw err;
+  });
+});
+
+Given(/^using the side effect (.+) defined as "(.+)"$/, function (sideEffectKey, stringValue) {
+  // Remove escaped chars
+  stringValue = stringValue.replace(/\\"/g, '"');
+  let p = Promise.resolve();
+  if (this.graphName === 'empty') {
+    p = this.loadEmptyGraphData();
+  } else if (this.graphName === 'multilabel') {
+    p = this.loadMultilabelGraphData();
+  }
+  return p.then(() => {
+    this.sideEffects[sideEffectKey] = parseValue.call(this, stringValue);
+  }).catch(err => {
+    if (err instanceof IgnoreError) {
+      return 'skipped';
+    }
+    throw err;
+  });
+});
+
+var removeProperties = function(p) {
+  if (p === undefined) {   
+  } else if (p instanceof Vertex || p instanceof Edge) {
+    p.properties = undefined;
+  } else if (p instanceof Array) {
+    p.forEach(removeProperties)
+  } else if (p instanceof Map) {
+    removeProperties(Array.from(p.keys()))
+    removeProperties(Array.from(p.values()))
+  } else if (p instanceof Path) {
+    removeProperties(p.objects)
+  }
+
+  return p
+}
+
+When('iterated to list', function () {
+  return this.traversal.toList().then(list => this.result = removeProperties(list)).catch(err => this.result = err);
+});
+
+When('iterated next', function () {
+  return this.traversal.next().then(it => {
+    // for Path compare using the objects array
+    this.result = removeProperties(it.value instanceof Path ? it.value.objects : it.value )
+  }).catch(err => this.result = err);
+});
+
+Then('the traversal will raise an error', function() {
+  expect(this.result).to.be.a.instanceof(Error);
+});
+
+Then(/^the traversal will raise an error with message (\w+) text of "(.+)"$/, function(comparison, expectedMessage) {
+  expect(this.result).to.be.a.instanceof(Error);
+  if (comparison === "containing") {
+    expect(this.result.message.toUpperCase()).to.contain(expectedMessage.toUpperCase())
+  } else if (comparison === "starting") {
+    expect(this.result.message.toUpperCase()).to.startWith(expectedMessage.toUpperCase())
+  } else if (comparison === "ending") {
+    expect(this.result.message.toUpperCase()).to.endWith(expectedMessage.toUpperCase())
+  } else {
+    throw new Error('unknown comparison \'' + comparison + '\'- must be: containing, ending or starting');
+  }
+});
+
+Then(/^the result should be (\w+)$/, function assertResult(characterizedAs, resultTable) {
+  if (this.result instanceof Error) {
+    console.error('Error encountered:', this.result.message, this.result.stack);
+  }
+  expect(this.result).to.not.be.a.instanceof(Error);
+
+  if (characterizedAs === 'empty') {
+    expect(this.result).to.be.empty;
+    if (typeof resultTable === 'function'){
+      return resultTable();
+    }
+    return;
+  }
+  const expectedResult = resultTable.rows().map(row => parseRow.call(this, row));
+  switch (characterizedAs) {
+    case 'ordered':
+      expect(toCompare(this.result)).to.have.deep.ordered.members(expectedResult);
+      break;
+    case 'unordered':
+      expect(toCompare(this.result)).to.have.deep.members(expectedResult);
+      break;
+    case 'of':
+      // result is a subset of the expected
+      expect(expectedResult).to.include.deep.members(toCompare(this.result));
+      break;
+  }
+});
+
+Then('the result should be a subgraph with the following', function (resultTable) {
+  if (this.result instanceof Error) {
+    console.error('Error encountered:', this.result.message, this.result.stack);
+  }
+  expect(this.result).to.not.be.a.instanceof(Error);
+
+  // 'iterated next' surfaces the Graph directly; 'iterated to list' wraps it in an array.
+  const sg = Array.isArray(this.result) ? this.result[0] : this.result;
+  expect(sg).to.be.an.instanceof(Graph);
+
+  // No data table means there's nothing further to assert.
+  if (!resultTable || typeof resultTable.raw !== 'function') {
+    return;
+  }
+  const raw = resultTable.raw();
+  if (!raw || raw.length === 0) {
+    return;
+  }
+  const header = raw[0][0];
+  const assertingVertices = header === 'vertices';
+
+  const dataRows = typeof resultTable.rows === 'function' ? resultTable.rows() : raw.slice(1);
+
+  if (assertingVertices) {
+    const expectedVertices = dataRows.map(row => parseValue.call(this, row[0]));
+    expect(sg.vertices.size).to.equal(expectedVertices.length);
+    for (const expected of expectedVertices) {
+      expect(sg.vertices.has(expected.id)).to.equal(true,
+        format('subgraph is missing vertex %s', inspect(expected.id)));
+      const actual = sg.vertices.get(expected.id);
+      expect(actual.label).to.equal(expected.label);
+    }
+  } else {
+    const expectedEdges = dataRows.map(row => parseValue.call(this, row[0]));
+    expect(sg.edges.size).to.equal(expectedEdges.length);
+    for (const expected of expectedEdges) {
+      expect(sg.edges.has(expected.id)).to.equal(true,
+        format('subgraph is missing edge %s', inspect(expected.id)));
+      const actual = sg.edges.get(expected.id);
+      expect(actual.label).to.equal(expected.label);
+      expect(actual.outV.id).to.equal(expected.outV.id);
+      expect(actual.inV.id).to.equal(expected.inV.id);
+    }
+  }
+});
+
+Then('the result should be a tree with a structure of', function (expectedTree) {
+  expect(this.result).to.not.be.a.instanceof(Error);
+
+  // The traversal yields a single Tree (via "iterated next"), stored directly on this.result.
+  const tree = this.result;
+  expect(tree).to.be.a.instanceof(Tree, 'expected the result to be a Tree');
+
+  // an empty doc string represents an empty tree
+  const roots = parseTree.call(this, expectedTree);
+
+  // validate that the tree matches the parsed expected structure
+  expect(tree.rootNodes().length).to.equal(roots.length,
+    'tree root node count does not match expected structure');
+  for (const root of roots) {
+    expect(tree.hasChild(root.value)).to.equal(true,
+      format('tree not matching at %s', inspect(root.value)));
+    validateTreeStructure.call(this, tree.childAt(root.value), root);
+  }
+});
+
+function validateTreeStructure(actualTree, expectedNode) {
+  expect(actualTree.rootNodes().length).to.equal(expectedNode.children.length,
+    format('tree child count does not match at %s', inspect(expectedNode.value)));
+  for (const child of expectedNode.children) {
+    expect(actualTree.hasChild(child.value)).to.equal(true,
+      format('tree not matching at %s', inspect(child.value)));
+    validateTreeStructure.call(this, actualTree.childAt(child.value), child);
+  }
+}
+
+// Parses the ascii-tree structure as taken from the Gherkin feature file. Mirrors the Java
+// StepDefinition.parseTree (and the .NET CommonSteps.ParseTree): a line's depth is the number of
+// leading spaces divided by three, and the node value is the line with the leading "|--" marker
+// stripped and trimmed, then run through parseValue.
+function parseTree(asciiTree) {
+  const roots = [];
+  if (asciiTree === undefined || asciiTree === null || asciiTree.length === 0) {
+    return roots;
+  }
+
+  const lines = asciiTree.split(/\r\n|\r|\n/);
+  const levelMap = {};
+
+  for (const line of lines) {
+    if (line.length === 0) {
+      continue;
+    }
+
+    let leadingSpaces = 0;
+    for (const c of line) {
+      if (c === ' ') {
+        leadingSpaces++;
+      } else {
+        break;
+      }
+    }
+    const level = Math.floor(leadingSpaces / 3); // 3 spaces per level
+    const rawValue = line.replace('|--', '').trim();
+
+    const node = { value: parseValue.call(this, rawValue), children: [] };
+    if (level === 0) {
+      roots.push(node);
+    } else {
+      levelMap[level - 1].children.push(node);
+    }
+
+    levelMap[level] = node;
+  }
+
+  return roots;
+}
+
+
+Then(/^the graph should return (\d+) for count of "(.+)"$/, function (stringCount, traversalText) {
+  expect(this.result).to.not.be.a.instanceof(Error);
+
+  const p = Object.assign({}, this.parameters);
+  p.g = this.g;
+  const traversal = gremlin[this.scenario].shift()(p);
+  return traversal.toList().then(list => {
+    expect(list).to.have.lengthOf(parseInt(stringCount, 10));
+  });
+});
+
+Then(/^the result should have a count of (\d+)$/, function (stringCount) {
+  expect(this.result).to.not.be.a.instanceof(Error);
+
+  const expected = parseInt(stringCount, 10);
+  if (!Array.isArray(this.result)) {
+    let count = 0;
+    if (this.result instanceof Map) {
+      count = this.result.size;
+    }
+    else if (typeof this.result === 'object') {
+      count = Object.keys(this.result).length;
+    }
+    else {
+      throw new Error('result not supported: ' + inspect(this.result));
+    }
+    expect(count).to.be.equal(expected);
+    return;
+  }
+  expect(this.result).to.have.lengthOf(expected);
+});
+
+Then('nothing should happen because', _ => {});
+
+function getSandbox(g, parameters) {
+  const sandbox = {
+    g: g,
+    __: __,
+    Barrier: barrier,
+    Cardinality: cardinality,
+    Column: column,
+    Direction: {
+      BOTH: direction.both,
+      IN: direction.in,
+      OUT: direction.out,
+      from_: direction.in,
+      to: direction.out,
+    },
+    Order: order,
+    P: P,
+    TextP: TextP,
+    IO: IO,
+    Pick: pick,
+    Pop: pop,
+    Scope: scope,
+    Operator: operator,
+    T: t,
+    toLong: toLong,
+    WithOptions: withOptions
+  };
+  // Pass the parameter to the sandbox
+  Object.keys(parameters).forEach(paramName => sandbox[paramName] = parameters[paramName]);
+  return sandbox;
+}
+
+function parseRow(row) {
+  return parseValue.call(this, row[0]);
+}
+
+function parseValue(stringValue) {
+
+  if(stringValue === "null")
+    return null;
+  if(stringValue === "true")
+    return true;
+  if(stringValue === "false")
+    return false;
+  if(stringValue === "d[NaN]")
+    return Number.NaN;
+  if(stringValue === "d[Infinity]")
+    return Number.POSITIVE_INFINITY;
+  if(stringValue === "d[-Infinity]")
+    return Number.NEGATIVE_INFINITY;
+
+  let extractedValue = null;
+  let parser = null;
+  for (let item of parsers) {
+    let re = item[0];
+    let match = re.exec(stringValue);
+    if (match && match.length > 1) {
+      parser = item[1];
+      extractedValue = match[1];
+      break;
+    }
+  }
+
+  return parser !== null ? parser.call(this, extractedValue) : stringValue;
+}
+
+function toNumeric(stringValue) {
+  try {
+    return parseFloat(stringValue);
+  } catch (Error) {
+    return BigInt(stringValue);
+  }
+}
+
+function toVertex(name) {
+  // some vertices are cached, like those from toy graphs but some are just references. if they are
+  // not cached then they are meant to be references.
+  const vertices = this.getData().vertices;
+  if (vertices.has(name))
+    return this.getData().vertices.get(name);
+  else
+    return new Vertex(name, "vertex")
+}
+
+function toVertexId(name) {
+  return toVertex.call(this, name).id;
+}
+
+function toVertexIdString(name) {
+  return toVertex.call(this, name).id.toString();
+}
+
+function toEdge(name) {
+  const e = this.getData().edges[name];
+  if (!e) {
+    throw new Error(format('Edge with key "%s" not found', name));
+  }
+  return e;
+}
+
+function toEdgeId(name) {
+  return toEdge.call(this, name).id;
+}
+
+function toEdgeIdString(name) {
+  return toEdge.call(this, name).id.toString();
+}
+
+function toVertexProperty(name) {
+  const vp = this.getData().vertexProperties[name];
+  if (!vp) {
+    throw new Error(format('VertexProperty with key "%s" not found', name));
+  }
+  return vp;
+}
+
+function toProperty(value) {
+  const commaIdx = value.indexOf(',');
+  const key = value.substring(0, commaIdx);
+  const val = parseValue.call(this, value.substring(commaIdx + 1));
+  return new Property(key, val);
+}
+
+function toPath(value) {
+  const parts = value.split(',');
+  return new Path(new Array(0), parts.map(x => parseValue.call(this, x)));
+}
+
+function toT(value) {
+  return t[value];
+}
+
+function toDirection(value) {
+  // swap Direction.from alias
+  if (value === 'from')
+    return direction["from_"];
+  else
+    return direction[value.toLowerCase()];
+}
+
+function toDateTime(value) {
+  return new Date(value);
+}
+
+function toUuid(value) {
+  return value;
+}
+
+function toMerge(value) {
+  return merge[value];
+}
+
+function toBinary(value) {
+  return Buffer.from(value, 'base64');
+}
+
+function splitByElement(s) {
+  let depth = 0;
+  let current = '';
+  const results = [];
+  for (const c of s) {
+    if (c === '[') {
+      depth++;
+      current += c;
+    } else if (c === ']') {
+      depth--;
+      current += c;
+    } else if (c === ',' && depth === 0) {
+      results.push(current.trim());
+      current = '';
+    } else {
+      current += c;
+    }
+  }
+  if (current.length > 0) results.push(current.trim());
+  return results;
+}
+
+function toArray(stringList) {
+  if (stringList === '') {
+    return new Array(0);
+  }
+  return splitByElement(stringList).map(x => parseValue.call(this, x));
+}
+
+function toSet(stringList) {
+  if (stringList === '') {
+    return new Set();
+  }
+
+  const s = new Set();
+  splitByElement(stringList).forEach(x => s.add(parseValue.call(this, x)));
+  return s;
+}
+
+function toMap(stringMap) {
+  return parseMapValue.call(this, JSON.parse(stringMap));
+}
+
+function parseMapValue(value) {
+  if (value === null)
+    return null;
+
+  if (typeof value === 'string') {
+    return parseValue.call(this, value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(x => parseMapValue.call(this, x));
+  }
+  if (typeof value !== 'object') {
+    return value;
+  }
+  const map = new Map();
+  Object.keys(value).forEach(key => {
+    map.set(parseMapValue.call(this, key), parseMapValue.call(this, value[key]));
+  });
+  return map;
+}
+
+/**
+ * Adapts the object to be compared, removing labels property of the Path.
+ */
+function toCompare(obj) {
+  if (!obj) {
+    return obj;
+  }
+  if (typeof obj !== 'object') {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(toCompare);
+  }
+  if (obj instanceof Path) {
+    // labels are ignored
+    obj.labels = new Array(0);
+  }
+  return obj;
+}
+
+function IgnoreError(reason) {
+  Error.call(this, reason);
+  Error.captureStackTrace(this, IgnoreError);
+}
+
+inherits(IgnoreError, Error);

@@ -1,0 +1,86 @@
+#region License
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+#endregion
+
+using System;
+using System.Threading.Tasks;
+using Gremlin.Net.Driver;
+using Gremlin.Net.Structure.IO.GraphBinary4;
+using Xunit;
+
+namespace Gremlin.Net.UnitTest.Driver
+{
+    public class GremlinClientTests
+    {
+        [Fact]
+        public void ShouldCreateClientWithDefaultSettings()
+        {
+            using var client = new GremlinClient(new GremlinServer());
+            // Should not throw — default serializer and settings are used
+        }
+
+        [Fact]
+        public void ShouldCreateClientWithCustomResponseSerializer()
+        {
+            var serializer = new GraphBinary4MessageSerializer();
+            using var client = new GremlinClient(new GremlinServer(), responseSerializer: serializer);
+            // Should not throw
+        }
+
+        [Fact]
+        public void ShouldCreateClientWithCustomSettings()
+        {
+            var settings = new ConnectionSettings
+            {
+                Compression = Compression.Deflate,
+                BulkResults = true
+            };
+            using var client = new GremlinClient(new GremlinServer(), connectionSettings: settings);
+            // Should not throw
+        }
+
+        [Fact]
+        public void ShouldDisposeWithoutError()
+        {
+            var client = new GremlinClient(new GremlinServer());
+            client.Dispose();
+            // Should not throw on double dispose
+            client.Dispose();
+        }
+
+        [Fact]
+        public void ShouldAppendAuthInterceptorToEndOfList()
+        {
+            Func<HttpRequestContext, Task> userInterceptor = ctx => Task.CompletedTask;
+            Func<HttpRequestContext, Task> auth = ctx => Task.CompletedTask;
+
+            using var client = new GremlinClient(new GremlinServer(),
+                auth: auth,
+                interceptors: new[] { userInterceptor });
+
+            var interceptors = client.Connection.Interceptors;
+            Assert.Equal(2, interceptors.Count);
+            Assert.Same(userInterceptor, interceptors[0]);
+            Assert.Same(auth, interceptors[1]);
+        }
+    }
+}
